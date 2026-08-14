@@ -18,6 +18,26 @@ User Interaction --> Rating --> Training Data --> Fine-tuning --> Review --> Pro
 
 ## Command Reference
 
+### `/refine`
+
+Evidence-driven self-improvement at the prompt/tactic level (fast, no
+training). Reviews recent session trajectories and proposes small,
+reversible changes. Human approval is mandatory.
+
+```
+/refine                  -- Generate proposals from recent sessions
+/refine list             -- List proposals (pending/approved/applied/rejected)
+/refine show <id>        -- Inspect a proposal's evidence and content
+/refine approve <id>     -- Approve a proposal (review gate)
+/refine apply <id>       -- Apply: tactic → draft tactic; patch → prompt file
+/refine reject <id>      -- Reject a proposal
+```
+
+Proposals are stored in `~/.momo/refine/proposals/`. Applied tactics
+enter the experience loop as `draft` and must still earn promotion
+through the standard Gate. Applied prompt patches live in
+`~/.momo/prompts/refine-patch.md` and are injected into every session.
+
 ### `/fine-tune`
 
 Manage the self-evolution system.

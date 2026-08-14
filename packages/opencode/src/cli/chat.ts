@@ -1,3 +1,10 @@
+import { loadActiveCcSwitchProvider } from "../provider/cc-switch.js"
+import { recordSession } from "../session/recorder.js"
+import { SignalScorer } from "../evolve/signals.js"
+import { getPromptPatchPath } from "../refine/apply.js"
+import { activeGoalsBlock } from "../goal/store.js"
+import * as fs from "fs"
+
 /**
  * MOMO CODE — Core agent chat loop.
  *
@@ -44,6 +51,21 @@ interface ChatOptions {
   headers?: Record<string, string>
   /** Request timeout in ms */
   timeout?: number
+  /** Optional per-token callback when streaming (serve SSE, UI progress). */
+  onToken?: (chunk: string) => void
+  /** Optional usage callback (token counters from the provider response). */
+  onUsage?: (usage: Usage) => void
+}
+
+/** Token usage counters reported by an OpenAI-compatible endpoint. */
+export interface Usage {
+  readonly promptTokens?: number
+  readonly completionTokens?: number
+  readonly totalTokens?: number
+}
+
+function numOrUndefined(v: unknown): number | undefined {
+  return typeof v === "number" ? v : undefined
 }
 
 // ---------------------------------------------------------------------------
@@ -66,9 +88,17 @@ const MAGENTA = "\x1b[95m"
  *   data: {"choices":[{"delta":{"content":"Hello"}}]}
  *   data: [DONE]
  */
+/** One streamed token from the model. */
+interface SSEChunk {
+  readonly text: string
+  /** True when the chunk is model reasoning, not part of the final answer. */
+  readonly reasoning: boolean
+}
+
 async function* parseSSEStream(
   reader: ReadableStreamDefaultReader<Uint8Array>,
-): AsyncGenerator<string, void> {
+  onUsage?: (usage: Usage) => void,
+): AsyncGenerator<SSEChunk, void> {
   const decoder = new TextDecoder()
   let buffer = ""
 
@@ -93,10 +123,19 @@ async function* parseSSEStream(
         const parsed = JSON.parse(data)
         // OpenAI format: choices[0].delta.content
         const content = parsed.choices?.[0]?.delta?.content
-        if (content) yield content
+        if (content) yield { text: content, reasoning: false }
         // Also handle 'reasoning_content' (some Chinese providers)
         const reasoning = parsed.choices?.[0]?.delta?.reasoning_content
-        if (reasoning) yield reasoning
+        if (reasoning) yield { text: reasoning, reasoning: true }
+        // Usage arrives in the final chunk when stream_options.include_usage
+        const usage = parsed.usage
+        if (usage && typeof usage === "object") {
+          onUsage?.({
+            promptTokens: numOrUndefined(usage.prompt_tokens),
+            completionTokens: numOrUndefined(usage.completion_tokens),
+            totalTokens: numOrUndefined(usage.total_tokens),
+          })
+        }
       } catch {
         // Skip unparseable lines
       }
@@ -123,6 +162,8 @@ export async function chatComplete(opts: ChatOptions): Promise<string> {
     temperature = 0.7,
     headers: extraHeaders = {},
     timeout = 120_000,
+    onToken,
+    onUsage,
   } = opts
 
   // Build messages array
@@ -130,18 +171,24 @@ export async function chatComplete(opts: ChatOptions): Promise<string> {
     ? [{ role: "system", content: system }, ...messages]
     : [...messages]
 
-  const body = JSON.stringify({
+  const bodyPayload: Record<string, unknown> = {
     model,
     messages: bodyMessages,
     stream,
     temperature,
-  })
+  }
+  // Request usage counters on streaming calls only when someone consumes
+  // them (graph nodes/planner/synthesis). Graceful: a provider that
+  // rejects `stream_options` gets a plain retry below.
+  const wantUsage = stream && typeof onUsage === "function"
+  if (wantUsage) bodyPayload.stream_options = { include_usage: true }
+  const body = JSON.stringify(bodyPayload)
 
   const controller = new AbortController()
   const timer = setTimeout(() => controller.abort(), timeout)
 
   try {
-    const response = await fetch(`${baseUrl}/chat/completions`, {
+    let response = await fetch(`${baseUrl}/chat/completions`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -151,6 +198,26 @@ export async function chatComplete(opts: ChatOptions): Promise<string> {
       body,
       signal: controller.signal,
     })
+
+    // Some providers reject `stream_options` with a 400 — retry once plain.
+    if (response.status === 400 && wantUsage) {
+      const plainBody = JSON.stringify({
+        model,
+        messages: bodyMessages,
+        stream,
+        temperature,
+      })
+      response = await fetch(`${baseUrl}/chat/completions`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          ...extraHeaders,
+        },
+        body: plainBody,
+        signal: controller.signal,
+      })
+    }
 
     clearTimeout(timer)
 
@@ -165,6 +232,15 @@ export async function chatComplete(opts: ChatOptions): Promise<string> {
       // Non-streaming: parse full JSON response
       const data = (await response.json()) as {
         choices?: Array<{ message?: { content?: string } }>
+        usage?: { prompt_tokens?: unknown; completion_tokens?: unknown; total_tokens?: unknown }
+      }
+      const usage = data.usage
+      if (usage && typeof usage === "object") {
+        onUsage?.({
+          promptTokens: numOrUndefined(usage.prompt_tokens),
+          completionTokens: numOrUndefined(usage.completion_tokens),
+          totalTokens: numOrUndefined(usage.total_tokens),
+        })
       }
       return data.choices?.[0]?.message?.content || ""
     }
@@ -177,9 +253,13 @@ export async function chatComplete(opts: ChatOptions): Promise<string> {
     const reader = response.body.getReader()
     let fullText = ""
 
-    for await (const chunk of parseSSEStream(reader)) {
-      process.stdout.write(chunk)
-      fullText += chunk
+    for await (const { text, reasoning } of parseSSEStream(reader, onUsage)) {
+      // Reasoning is meta-output: keep it off stdout so captured subagent
+      // stdout is just the final answer. Interactive terminals still show it.
+      if (reasoning) process.stderr.write(text)
+      else process.stdout.write(text)
+      fullText += text
+      onToken?.(text)
     }
 
     return fullText
@@ -200,13 +280,28 @@ export async function chatComplete(opts: ChatOptions): Promise<string> {
  * Resolve provider config from environment variables.
  * Returns null if no credentials found.
  */
-export function resolveProviderFromEnv(): {
+export async function resolveProviderConfig(): Promise<{
   baseUrl: string
   apiKey: string
   model: string
   providerName: string
-} | null {
-  // Generic key + provider
+} | null> {
+  // 1. Try CC Switch active provider first (white-collar zero-config path).
+  //    momo is opencode-based: prefer opencode, fall back to claude.
+  const ccProvider =
+    (await loadActiveCcSwitchProvider("opencode")) ||
+    (await loadActiveCcSwitchProvider("claude"))
+  if (ccProvider) {
+    const factory = getFactoryConfig(ccProvider.providerName)
+    return {
+      baseUrl: ccProvider.baseUrl || factory.baseUrl || "",
+      apiKey: ccProvider.apiKey,
+      model: ccProvider.model || factory.defaultModel || "gpt-4",
+      providerName: ccProvider.providerName,
+    }
+  }
+
+  // 2. Fall back to environment variables.
   const genericKey = process.env.MOMO_API_KEY
   const provider = process.env.MOMO_PROVIDER || "openai"
 
@@ -243,6 +338,11 @@ export function resolveProviderFromEnv(): {
     model: resolvedModel,
     providerName: provider,
   }
+}
+
+/** @deprecated Use resolveProviderConfig() instead. */
+export function resolveProviderFromEnv(): ReturnType<typeof resolveProviderConfig> {
+  return resolveProviderConfig()
 }
 
 /** Get factory defaults for a provider name. */
@@ -332,7 +432,7 @@ Guidelines:
  */
 export async function runChat(prompt: string): Promise<number> {
   // Resolve provider configuration
-  const config = resolveProviderFromEnv()
+  const config = await resolveProviderConfig()
 
   if (!config) {
     console.error(`${RESET}`)
@@ -374,7 +474,9 @@ export async function runChat(prompt: string): Promise<number> {
         InjectForTask({
           id: `chat_${Date.now()}`,
           description: prompt,
-          signals: [],
+          // Synthetic session-start signal so trigger patterns can match
+          // (same convention as `momo /evolve --inject`).
+          signals: [SignalScorer.fromExitCode(0, "bash")],
         }).pipe(
           Effect.provide(SelectorLive),
           Effect.provide(InjectorLive),
@@ -388,7 +490,33 @@ export async function runChat(prompt: string): Promise<number> {
       // Tactic injection failed, use default prompt
     }
 
+    // Inject human-approved /refine prompt patches (persistent self-improvement)
+    try {
+      const patchPath = getPromptPatchPath()
+      if (fs.existsSync(patchPath)) {
+        const patch = fs.readFileSync(patchPath, "utf-8").trim()
+        if (patch) {
+          systemPrompt += "\n\n---\n\n## Refined Behavior (approved patches)\n" + patch
+        }
+      }
+    } catch {
+      // Prompt patch injection is best-effort
+    }
+
+    // Inject active persistent goals (long-term objectives across sessions)
+    try {
+      const goalsBlock = activeGoalsBlock()
+      if (goalsBlock) {
+        systemPrompt += "\n\n---\n\n" + goalsBlock
+      }
+    } catch {
+      // Goal injection is best-effort
+    }
+
     // Call the model
+    const startMs = Date.now()
+    const usageFile = process.env.MOMO_USAGE_FILE
+    const usageSink: Usage[] = []
     const response = await chatComplete({
       baseUrl: config.baseUrl,
       apiKey: config.apiKey,
@@ -397,6 +525,35 @@ export async function runChat(prompt: string): Promise<number> {
       messages: [{ role: "user", content: prompt }],
       stream: true,
       temperature: 0.7,
+      onUsage: (u) => usageSink.push(u),
+    })
+
+    // Report token usage to the parent (graph nodes via MOMO_USAGE_FILE).
+    if (usageFile && usageSink.length > 0) {
+      try {
+        const merged: Usage = usageSink.reduce<Usage>(
+          (acc, u) => ({
+            promptTokens: (acc.promptTokens ?? 0) + (u.promptTokens ?? 0),
+            completionTokens: (acc.completionTokens ?? 0) + (u.completionTokens ?? 0),
+            totalTokens: (acc.totalTokens ?? 0) + (u.totalTokens ?? 0),
+          }),
+          {},
+        )
+        fs.writeFileSync(usageFile, JSON.stringify(merged))
+      } catch {
+        // best-effort — usage reporting must never break the chat
+      }
+    }
+
+    // Persist trajectory for /refine and signal mining (best-effort)
+    await recordSession({
+      provider: config.providerName,
+      model: config.model,
+      prompt,
+      response,
+      exitCode: 0,
+      durationMs: Date.now() - startMs,
+      rlmDepth: Number(process.env.MOMO_RLM_DEPTH || 0) || 0,
     })
 
     console.error(``) // newline after stream
@@ -406,6 +563,18 @@ export async function runChat(prompt: string): Promise<number> {
     console.error(
       `${MAGENTA}MOMO CODE${RESET} ${RESET}Error: ${err instanceof Error ? err.message : String(err)}${RESET}`,
     )
+
+    // Persist failed trajectories too — they are the most valuable
+    // evidence for /refine proposals.
+    await recordSession({
+      provider: config.providerName,
+      model: config.model,
+      prompt,
+      response: `ERROR: ${err instanceof Error ? err.message : String(err)}`,
+      exitCode: 1,
+      durationMs: 0,
+      rlmDepth: Number(process.env.MOMO_RLM_DEPTH || 0) || 0,
+    })
 
     // Helpful hints for common errors
     const msg = err instanceof Error ? err.message : ""

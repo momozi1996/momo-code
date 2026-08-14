@@ -114,6 +114,14 @@ export class Evaluator extends Effect.Service<Evaluator>()("evolve/Evaluator", {
           `[Evaluator] Detailed eval of ${modelId} on ${evalSet}`,
         )
 
+        // Check cache first
+        const cached = yield* Ref.get(resultsRef)
+        const cacheKey = `${modelId}:${evalSet}`
+        if (cached.has(cacheKey)) {
+          yield* Effect.log(`[Evaluator] Using cached detailed result for ${cacheKey}`)
+          return cached.get(cacheKey)!
+        }
+
         // In production: load eval tasks and run each one
         // For now, simulate per-task results
         const numTasks = 320 // momo-bench-v1 has ~320 tasks

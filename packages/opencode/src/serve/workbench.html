@@ -1,0 +1,597 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>momo sim workbench</title>
+<style>
+  :root { --bg:#0d1117; --panel:#161b22; --border:#30363d; --fg:#e6edf3; --dim:#8b949e; --accent:#c678dd; --green:#3fb950; --red:#f85149; --yellow:#d29922; --cyan:#39c5cf; }
+  * { box-sizing: border-box; }
+  html,body { height:100%; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:13px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace; display:flex; flex-direction:column; overflow:hidden; }
+  header { display:flex; align-items:center; gap:14px; padding:8px 16px; background:var(--panel); border-bottom:1px solid var(--border); flex:none; }
+  body.embed header { display:none; }
+  header .logo { color:var(--accent); font-weight:bold; font-size:15px; }
+  header .meta { color:var(--dim); font-size:12px; }
+  header a { color:var(--cyan); text-decoration:none; font-size:12px; }
+  #estopLamp { font-size:12px; } .estop-on { color:var(--red); font-weight:bold; } .estop-off { color:var(--green); }
+  #conn { margin-left:auto; font-size:12px; } #conn.ok { color:var(--green); } #conn.bad { color:var(--red); }
+  #tokenBox { display:none; gap:6px; }
+  #tokenBox input { background:var(--bg); color:var(--fg); border:1px solid var(--border); padding:3px 8px; border-radius:4px; }
+  #main { display:grid; grid-template-columns:230px 1fr 280px; flex:1; min-height:0; }
+  .side { background:var(--panel); overflow-y:auto; padding:10px; }
+  .side.left { border-right:1px solid var(--border); }
+  .side.right { border-left:1px solid var(--border); }
+  .side h3 { margin:4px 0 8px; font-size:12px; color:var(--dim); text-transform:uppercase; letter-spacing:1px; }
+  #viewport { position:relative; min-width:0; min-height:0; background:#000; }
+  #viewport canvas { display:block; }
+  #viewportHint { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; text-align:center; color:var(--dim); pointer-events:none; padding:20px; }
+  .tree-item { padding:3px 6px; border-radius:4px; cursor:pointer; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .tree-item:hover { background:var(--bg); }
+  .tree-item.sel { background:var(--bg); color:var(--cyan); }
+  .tree-item .type { color:var(--dim); font-size:11px; }
+  .kv { font-size:12px; margin:2px 0; } .kv b { color:var(--dim); font-weight:normal; display:inline-block; width:70px; }
+  button { background:var(--accent); color:#fff; border:none; padding:5px 12px; border-radius:5px; cursor:pointer; font:inherit; font-size:12px; }
+  button.ghost { background:none; border:1px solid var(--border); color:var(--fg); }
+  button.danger { background:var(--red); }
+  button:disabled { opacity:0.5; cursor:default; }
+  input,textarea { background:var(--bg); color:var(--fg); border:1px solid var(--border); padding:4px 8px; border-radius:4px; font:inherit; font-size:12px; }
+  input.num { width:52px; }
+  .row { display:flex; gap:6px; align-items:center; flex-wrap:wrap; margin:6px 0; }
+  .cam { border:1px solid var(--border); border-radius:6px; padding:6px 8px; margin:6px 0; }
+  .cam .nm { color:var(--cyan); }
+  .cam button.on { border-color:var(--cyan); color:var(--cyan); }
+  #timeline { flex:none; background:var(--panel); border-top:1px solid var(--border); padding:8px 16px; }
+  #timeline .row { margin:0; }
+  #clockDisplay { min-width:230px; color:var(--cyan); }
+  #playBtn.playing { background:var(--yellow); color:#000; }
+  input[type=range] { width:140px; padding:0; }
+  #frames { display:flex; gap:8px; margin-top:8px; overflow-x:auto; min-height:0; }
+  #frames figure { margin:0; flex:none; text-align:center; }
+  #frames img { width:120px; height:90px; object-fit:cover; border:1px solid var(--border); border-radius:4px; background:#000; }
+  #frames figcaption { font-size:10px; color:var(--dim); }
+  #drawer { position:fixed; left:0; right:0; bottom:0; background:var(--panel); border-top:2px solid var(--accent); padding:14px 18px; transform:translateY(100%); transition:transform .2s; z-index:10; max-height:70vh; overflow-y:auto; }
+  #drawer.open { transform:none; }
+  #drawer textarea { width:100%; min-height:220px; font-size:12px; }
+  #previewResult { margin-top:8px; }
+  pre { background:var(--bg); border:1px solid var(--border); border-radius:6px; padding:10px; overflow:auto; font-size:12px; white-space:pre-wrap; max-height:220px; }
+  .toast { position:fixed; top:52px; right:16px; background:var(--panel); border:1px solid var(--accent); border-radius:6px; padding:8px 14px; z-index:20; display:none; }
+  .dim { color:var(--dim); } .ok { color:var(--green); } .err { color:var(--red); }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<header>
+  <span class="logo">◉ momo workbench</span>
+  <span class="meta" id="worldMeta">world: connecting…</span>
+  <span id="estopLamp" class="estop-off">ESTOP: off</span>
+  <button class="danger" id="estopBtn">ESTOP</button>
+  <button class="ghost" id="resumeBtn">Resume</button>
+  <a href="/">← dashboard</a>
+  <span id="tokenBox"><input id="tokenInput" placeholder="token" size="12"><button class="ghost" onclick="saveToken()">set</button></span>
+  <span id="conn">…</span>
+</header>
+<div id="main">
+  <div class="side left">
+    <h3>Entities <button class="ghost" id="refreshSceneBtn" style="float:right">↻</button></h3>
+    <div id="tree" class="dim">no scene loaded</div>
+  </div>
+  <div id="viewport">
+    <div id="viewportHint">loading three.js…</div>
+  </div>
+  <div class="side right">
+    <h3>Inspector</h3>
+    <div id="inspector" class="dim">select an entity</div>
+    <h3 style="margin-top:14px">Asset presets</h3>
+    <div id="assetList" class="dim">loading…</div>
+    <h3 style="margin-top:14px">Cameras <button class="ghost" id="refreshCamsBtn" style="float:right">↻</button></h3>
+    <div id="camList" class="dim">none</div>
+    <div class="cam">
+      <div class="nm">add camera</div>
+      <div class="row"><input id="camName" placeholder="name" size="8"></div>
+      <div class="row">pos <input class="num" id="camPX" value="1.2"><input class="num" id="camPY" value="-1.2"><input class="num" id="camPZ" value="0.8"></div>
+      <div class="row">look <input class="num" id="camLX" value="0"><input class="num" id="camLY" value="0"><input class="num" id="camLZ" value="0.3"></div>
+      <div class="row"><button id="addCamBtn">add</button></div>
+    </div>
+  </div>
+</div>
+<div id="timeline">
+  <div class="row">
+    <span id="clockDisplay">t=0.000s · step 0 · 1.0x</span>
+    <button id="playBtn">▶ play</button>
+    <button class="ghost" id="stepBtn">⏭ step</button>
+    <span class="dim">speed</span>
+    <input type="range" id="speedSlider" min="0.1" max="10" step="0.1" value="1">
+    <span id="speedLabel">1.0x</span>
+    <button class="ghost" id="reloadMeshBtn">reload mesh</button>
+    <button class="ghost" id="rebuildBtn">rebuild world</button>
+    <button id="previewBtn">✎ preview script</button>
+  </div>
+  <div id="frames"></div>
+</div>
+<div id="drawer">
+  <div class="row">
+    <b>Pre-simulation preview</b>
+    <span class="dim">runs the script in the live world, builds the scene, re-exports the mesh — no physics steps</span>
+    <button id="runPreviewBtn">run preview</button>
+    <button class="ghost" id="closeDrawerBtn">close</button>
+  </div>
+  <textarea id="previewCode" spellcheck="false"></textarea>
+  <div id="previewResult"></div>
+</div>
+<div class="toast" id="toast"></div>
+<script type="module">
+import * as THREE from "three";
+import { OrbitControls } from "three/addons/controls/OrbitControls.js";
+import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
+
+// ---- embed mode (Sim view inside the momo workspace) ----------------------
+if (new URLSearchParams(location.search).has('embed')) document.body.classList.add('embed');
+
+// ---- auth / api helpers (same convention as the dashboard) -----------------
+let token = localStorage.getItem("momo_token") || "";
+function authHeaders() { return token ? { "Authorization": "Bearer " + token } : {}; }
+function tokenQuery() { return token ? "?token=" + encodeURIComponent(token) : ""; }
+async function api(path, opts) {
+  const r = await fetch(path, { headers: { "Content-Type": "application/json", ...authHeaders() }, ...opts });
+  const data = await r.json().catch(() => ({}));
+  if (r.status === 401) { document.getElementById("tokenBox").style.display = "inline-flex"; throw new Error("401 unauthorized — set token"); }
+  if (!r.ok) throw new Error(data.error || ("HTTP " + r.status));
+  return data;
+}
+window.saveToken = () => { token = document.getElementById("tokenInput").value.trim(); localStorage.setItem("momo_token", token); location.reload(); };
+if (token) document.getElementById("tokenInput").value = token;
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+function toast(msg, isErr) {
+  const t = document.getElementById("toast");
+  t.textContent = msg; t.style.display = "block";
+  t.style.borderColor = isErr ? "var(--red)" : "var(--accent)";
+  clearTimeout(toast._h); toast._h = setTimeout(() => { t.style.display = "none"; }, 3500);
+}
+function setConn(ok, label) {
+  const c = document.getElementById("conn");
+  c.textContent = label; c.className = ok ? "ok" : "bad";
+}
+
+// ---- three.js viewport ------------------------------------------------------
+const viewport = document.getElementById("viewport");
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+viewport.appendChild(renderer.domElement);
+const scene3 = new THREE.Scene();
+scene3.background = new THREE.Color(0x0d1117);
+const camera3 = new THREE.PerspectiveCamera(55, 1, 0.01, 500);
+camera3.position.set(2.2, 1.8, 2.2);
+const controls = new OrbitControls(camera3, renderer.domElement);
+controls.target.set(0, 0.3, 0);
+controls.enableDamping = true;
+scene3.add(new THREE.HemisphereLight(0xffffff, 0x334455, 1.2));
+const dirLight = new THREE.DirectionalLight(0xffffff, 1.4);
+dirLight.position.set(3, 5, 2);
+scene3.add(dirLight);
+const grid = new THREE.GridHelper(4, 40, 0x30363d, 0x1c2128);
+scene3.add(grid);
+scene3.add(new THREE.AxesHelper(0.5));
+
+// Genesis is Z-up; three.js is Y-up. A -90° X rotation on the world group
+// converts coordinates; node world poses are applied relative to it.
+const worldGroup = new THREE.Group();
+worldGroup.rotation.x = -Math.PI / 2;
+scene3.add(worldGroup);
+let meshRoot = null;               // currently loaded GLB scene
+const nodesByName = new Map();     // sanitized node name → Object3D
+
+// GLTFLoader sanitizes node names (strips ':' etc.) — mirror that for lookup.
+const sanitize = (n) => String(n).replace(/\s/g, "_").replace(/[^\w-]/g, "");
+
+function resize() {
+  const w = viewport.clientWidth, h = viewport.clientHeight;
+  if (!w || !h) return;
+  renderer.setSize(w, h);
+  camera3.aspect = w / h;
+  camera3.updateProjectionMatrix();
+}
+new ResizeObserver(resize).observe(viewport);
+resize();
+(function animate() { requestAnimationFrame(animate); controls.update(); renderer.render(scene3, camera3); })();
+
+const gltfLoader = new GLTFLoader();
+async function loadMesh() {
+  const hint = document.getElementById("viewportHint");
+  hint.style.display = "flex";
+  hint.textContent = "loading mesh…";
+  try {
+    const gltf = await gltfLoader.loadAsync("/api/sim/scene/mesh" + tokenQuery());
+    if (meshRoot) { worldGroup.remove(meshRoot); }
+    meshRoot = gltf.scene;
+    nodesByName.clear();
+    meshRoot.traverse((o) => { if (o.name) nodesByName.set(o.name, o); });
+    worldGroup.add(meshRoot);
+    hint.style.display = "none";
+    setConn(true, "mesh ok");
+  } catch (err) {
+    hint.textContent = "no scene mesh yet — write a preview script and press “run preview”";
+    setConn(false, "no mesh");
+  }
+}
+
+// Apply a genesis world pose to a viewport node (see workbench.scene_poses).
+function applyPose(node, pos, quat) {
+  const obj = nodesByName.get(sanitize(node));
+  if (!obj) return;
+  const m = new THREE.Matrix4().compose(
+    new THREE.Vector3(pos[0], pos[1], pos[2]),
+    new THREE.Quaternion(quat[1], quat[2], quat[3], quat[0]), // genesis wxyz → xyzw
+    new THREE.Vector3(1, 1, 1),
+  );
+  const world = new THREE.Matrix4().copy(worldGroup.matrix).multiply(m);
+  obj.updateWorldMatrix(true, false);
+  const local = obj.parent.matrixWorld.clone().invert().multiply(world);
+  local.decompose(obj.position, obj.quaternion, obj.scale);
+}
+
+// ---- SSE pose stream --------------------------------------------------------
+let poseSource = null;
+function connectStream() {
+  if (poseSource) poseSource.close();
+  poseSource = new EventSource("/api/sim/poses/stream" + tokenQuery());
+  poseSource.addEventListener("pose", (ev) => {
+    const poses = JSON.parse(ev.data);
+    for (const p of poses) applyPose(p.node, p.pos, p.quat);
+  });
+  poseSource.addEventListener("clock", (ev) => updateClock(JSON.parse(ev.data)));
+  poseSource.onerror = () => setConn(false, "stream…");
+  poseSource.onopen = () => setConn(true, "live");
+}
+
+// ---- timeline / clock --------------------------------------------------------
+const clockDisplay = document.getElementById("clockDisplay");
+const playBtn = document.getElementById("playBtn");
+let clock = { t: 0, steps: 0, playing: false, speed: 1.0, dt: 0.01 };
+function updateClock(c) {
+  if (!c) return;
+  clock = c;
+  applyFollowedPaths();
+  clockDisplay.textContent = `t=${clock.t.toFixed(3)}s · step ${clock.steps} · ${clock.speed}x`;
+  playBtn.textContent = clock.playing ? "⏸ pause" : "▶ play";
+  playBtn.classList.toggle("playing", !!clock.playing);
+  const slider = document.getElementById("speedSlider");
+  if (document.activeElement !== slider) {
+    slider.value = clock.speed;
+    document.getElementById("speedLabel").textContent = Number(clock.speed).toFixed(1) + "x";
+  }
+}
+playBtn.onclick = async () => {
+  try {
+    const r = await api("/api/sim/time", { method: "POST", body: JSON.stringify({ action: clock.playing ? "pause" : "play" }) });
+    updateClock(r.clock);
+  } catch (err) { toast(err.message, true); }
+};
+document.getElementById("stepBtn").onclick = async () => {
+  try {
+    const r = await api("/api/sim/time", { method: "POST", body: JSON.stringify({ action: "step", n: 1 }) });
+    updateClock(r.clock);
+  } catch (err) { toast(err.message, true); }
+};
+let speedTimer = null;
+document.getElementById("speedSlider").oninput = (ev) => {
+  const speed = Number(ev.target.value);
+  document.getElementById("speedLabel").textContent = speed.toFixed(1) + "x";
+  clearTimeout(speedTimer);
+  speedTimer = setTimeout(async () => {
+    try {
+      const r = await api("/api/sim/time", { method: "POST", body: JSON.stringify({ action: "speed", speed }) });
+      updateClock(r.clock);
+    } catch (err) { toast(err.message, true); }
+  }, 250);
+};
+document.getElementById("reloadMeshBtn").onclick = () => loadMesh();
+document.getElementById("rebuildBtn").onclick = async () => {
+  if (!confirm("Rebuild the world? The scene and clock are reset.")) return;
+  try {
+    await api("/api/sim/rebuild", { method: "POST", body: "{}" });
+    toast("world rebuilt — run a preview to populate it");
+    refreshAll();
+  } catch (err) { toast(err.message, true); }
+};
+
+// ---- entity tree + inspector --------------------------------------------------
+let entities = [];
+function renderTree() {
+  const tree = document.getElementById("tree");
+  if (!entities.length) { tree.innerHTML = '<span class="dim">no entities — run a preview</span>'; return; }
+  tree.innerHTML = entities.map((e, i) =>
+    `<div class="tree-item" data-i="${i}"><b>e${e.idx}</b> ${esc(e.name)} <span class="type">${esc(e.type)} · ${e.link_count} link${e.link_count === 1 ? "" : "s"}</span></div>`
+  ).join("");
+  tree.querySelectorAll(".tree-item").forEach((el) => {
+    el.onclick = () => {
+      tree.querySelectorAll(".sel").forEach((s) => s.classList.remove("sel"));
+      el.classList.add("sel");
+      showInspector(entities[Number(el.dataset.i)]);
+    };
+  });
+}
+function showInspector(e) {
+  const fmt = (v) => (v || []).map((x) => Number(x).toFixed(3)).join(", ");
+  document.getElementById("inspector").innerHTML =
+    `<div class="kv"><b>name</b>${esc(e.name)}</div>` +
+    `<div class="kv"><b>type</b>${esc(e.type)}</div>` +
+    `<div class="kv"><b>pos</b>${fmt(e.pos)}</div>` +
+    `<div class="kv"><b>quat</b>${fmt(e.quat)}</div>` +
+    `<div class="kv"><b>links</b>${e.link_count}</div>`;
+  // focus the viewport on this entity (genesis pos → worldGroup frame)
+  if (e.pos && e.pos.length === 3) {
+    controls.target.set(e.pos[0], e.pos[2], -e.pos[1]);
+  }
+}
+async function refreshScene() {
+  try {
+    const info = await api("/api/sim/scene/info");
+    entities = info.entities || [];
+    renderTree();
+    updateClock(info.clock);
+    document.getElementById("worldMeta").textContent =
+      `world: ${info.is_built ? "built" : "empty"} · dt=${info.dt} · ${entities.length} entities`;
+    setConn(true, "live");
+  } catch (err) {
+    document.getElementById("worldMeta").textContent = "world: offline";
+    setConn(false, "offline");
+  }
+}
+document.getElementById("refreshSceneBtn").onclick = () => refreshScene();
+
+// ---- cameras --------------------------------------------------------------------
+async function refreshCameras() {
+  const list = document.getElementById("camList");
+  try {
+    const { cameras } = await api("/api/sim/cameras");
+    for (const cam of cameras || []) cameraPaths[cam.name] = cam.path || [];
+    if (!cameras || !cameras.length) { list.innerHTML = '<span class="dim">none</span>'; return; }
+    list.innerHTML = cameras.map((c) => {
+      const kfs = cameraPaths[c.name] || [];
+      const follow = followSet.has(c.name);
+      return `<div class="cam">
+        <div class="row"><span class="nm">${esc(c.name)}</span>
+          <button class="ghost" data-snap="${esc(c.name)}" title="snapshot">📷</button>
+          <button class="ghost" data-kf="${esc(c.name)}" title="add keyframe at current viewer pose + clock time">📌</button>
+          <button class="ghost ${follow ? "on" : ""}" data-follow="${esc(c.name)}" title="follow path in viewport">${follow ? "■ stop" : "▶ follow"}</button>
+          <button class="ghost" data-rm="${esc(c.name)}">✕</button>
+        </div>
+        <div class="dim" style="font-size:11px">${kfs.length ? kfs.length + " keyframe(s)" : "no path — 📌 to add"}</div>
+        ${kfs.map((k, i) => `<div class="row" style="font-size:11px;margin:2px 0">
+          <span class="dim">t=${Number(k.t).toFixed(2)}s</span>
+          <span class="dim" style="font-size:10px">p(${k.pos.map(v => Number(v).toFixed(1)).join(",")})</span>
+          <button class="ghost" data-kfrm="${esc(c.name)}" data-idx="${i}" title="remove keyframe">✕</button>
+        </div>`).join("")}
+      </div>`;
+    }).join("");
+    list.querySelectorAll("[data-snap]").forEach((b) => { b.onclick = () => snapshot(b.dataset.snap); });
+    list.querySelectorAll("[data-kf]").forEach((b) => { b.onclick = () => addKeyframe(b.dataset.kf); });
+    list.querySelectorAll("[data-follow]").forEach((b) => { b.onclick = () => toggleFollow(b.dataset.follow); });
+    list.querySelectorAll("[data-kfrm]").forEach((b) => { b.onclick = () => removeKeyframe(b.dataset.kfrm, Number(b.dataset.idx)); });
+    list.querySelectorAll("[data-rm]").forEach((b) => {
+      b.onclick = async () => {
+        try {
+          await api(`/api/sim/cameras/${encodeURIComponent(b.dataset.rm)}/remove`, { method: "POST", body: "{}" });
+          delete cameraPaths[b.dataset.rm];
+          refreshCameras();
+        } catch (err) { toast(err.message, true); }
+      };
+    });
+  } catch (err) {
+    list.innerHTML = `<span class="err">${esc(err.message)}</span>`;
+  }
+}
+async function snapshot(name) {
+  try {
+    const r = await api(`/api/sim/cameras/${encodeURIComponent(name)}/snapshot`, { method: "POST", body: "{}" });
+    if (r.url) addFrameThumb(r.url, name);
+    else toast("snapshot returned no frame", true);
+  } catch (err) { toast(err.message, true); }
+}
+function addFrameThumb(url, label) {
+  const fig = document.createElement("figure");
+  const img = document.createElement("img");
+  img.src = url + tokenQuery();
+  const cap = document.createElement("figcaption");
+  cap.textContent = `${label} · ${new Date().toLocaleTimeString()}`;
+  fig.append(img, cap);
+  const strip = document.getElementById("frames");
+  strip.prepend(fig);
+  while (strip.children.length > 12) strip.lastChild.remove();
+}
+document.getElementById("refreshCamsBtn").onclick = () => refreshCameras();
+document.getElementById("addCamBtn").onclick = async () => {
+  const name = document.getElementById("camName").value.trim();
+  if (!name) { toast("camera needs a name", true); return; }
+  const num = (id) => Number(document.getElementById(id).value);
+  try {
+    await api("/api/sim/cameras", { method: "POST", body: JSON.stringify({
+      name,
+      pos: [num("camPX"), num("camPY"), num("camPZ")],
+      lookat: [num("camLX"), num("camLY"), num("camLZ")],
+    }) });
+    toast(`camera "${name}" added`);
+    refreshCameras();
+  } catch (err) { toast(err.message, true); }
+};
+
+// ---- ESTOP -----------------------------------------------------------------------
+async function refreshEstop() {
+  const lamp = document.getElementById("estopLamp");
+  try {
+    const r = await api("/api/sim/observe");
+    const on = !!r.estop;
+    lamp.textContent = on ? "ESTOP: ENGAGED" : "ESTOP: off";
+    lamp.className = on ? "estop-on" : "estop-off";
+  } catch { /* offline — leave lamp as-is */ }
+}
+document.getElementById("estopBtn").onclick = async () => {
+  try { await api("/api/sim/estop", { method: "POST", body: "{}" }); refreshEstop(); }
+  catch (err) { toast(err.message, true); }
+};
+document.getElementById("resumeBtn").onclick = async () => {
+  try { await api("/api/sim/resume", { method: "POST", body: "{}" }); refreshEstop(); }
+  catch (err) { toast(err.message, true); }
+};
+
+// ---- preview drawer -----------------------------------------------------------------
+const PREVIEW_TEMPLATE = `# Pre-simulation preview — available names: gs, scene, sensors, safety, perception
+# The scene is built after this script runs; physics is NOT stepped.
+franka = scene.add_entity(
+    gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"),
+)
+cube = scene.add_entity(
+    gs.morphs.Box(size=(0.06, 0.06, 0.06), pos=(0.55, 0.0, 0.35)),
+)
+`;
+document.getElementById("previewCode").value = PREVIEW_TEMPLATE;
+const drawer = document.getElementById("drawer");
+document.getElementById("previewBtn").onclick = () => drawer.classList.toggle("open");
+document.getElementById("closeDrawerBtn").onclick = () => drawer.classList.remove("open");
+document.getElementById("runPreviewBtn").onclick = async () => {
+  const out = document.getElementById("previewResult");
+  const btn = document.getElementById("runPreviewBtn");
+  const code = document.getElementById("previewCode").value;
+  btn.disabled = true;
+  out.innerHTML = '<span class="dim">running preview — this can take a while on the cpu backend…</span>';
+  try {
+    const r = await fetch("/api/sim/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...authHeaders() },
+      body: JSON.stringify({ code }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (r.ok && data.ok) {
+      out.innerHTML = `<span class="ok">preview ok — ${(data.entities || []).length} entities, cameras: ${esc((data.cameras || []).join(", ") || "none")}</span>`;
+      drawer.classList.remove("open");
+      toast("preview built — reloading mesh");
+      await loadMesh();
+      refreshScene();
+      refreshCameras();
+    } else {
+      out.innerHTML = `<pre class="err">${esc(data.error || JSON.stringify(data))}</pre>`;
+    }
+  } catch (err) {
+    out.innerHTML = `<pre class="err">${esc(err.message)}</pre>`;
+  } finally {
+    btn.disabled = false;
+  }
+};
+
+// ---- camera keyframe paths -------------------------------------------------
+const cameraPaths = {};      // name -> [{t, pos, lookat}] in genesis coords
+const followSet = new Set(); // camera names followed by the viewport camera
+
+function interpPath(kfs, t) {
+  if (!kfs || !kfs.length) return null;
+  const sorted = [...kfs].sort((a, b) => a.t - b.t);
+  if (t <= sorted[0].t) return sorted[0];
+  if (t >= sorted[sorted.length - 1].t) return sorted[sorted.length - 1];
+  for (let i = 0; i < sorted.length - 1; i++) {
+    const a = sorted[i], b = sorted[i + 1];
+    if (t >= a.t && t <= b.t) {
+      const span = Math.max(b.t - a.t, 1e-9);
+      const k = (t - a.t) / span;
+      return {
+        t,
+        pos: [0, 1, 2].map((i2) => a.pos[i2] + (b.pos[i2] - a.pos[i2]) * k),
+        lookat: [0, 1, 2].map((i2) => a.lookat[i2] + (b.lookat[i2] - a.lookat[i2]) * k),
+      };
+    }
+  }
+  return sorted[sorted.length - 1];
+}
+function applyFollowedPaths() {
+  for (const name of followSet) {
+    const kfs = cameraPaths[name];
+    if (!kfs || !kfs.length) continue;
+    const p = interpPath(kfs, clock.t);
+    if (!p) continue;
+    // genesis (Z-up) -> three.js (Y-up): (x,y,z) -> (x, z, -y)
+    camera3.position.set(p.pos[0], p.pos[2], -p.pos[1]);
+    controls.target.set(p.lookat[0], p.lookat[2], -p.lookat[1]);
+  }
+}
+function toggleFollow(name) {
+  if (followSet.has(name)) followSet.delete(name); else followSet.add(name);
+  refreshCameras();
+}
+async function addKeyframe(name) {
+  // viewer camera (three.js Y-up) -> genesis (Z-up): (x,y,z) -> (x, -z, y)
+  const pos = [camera3.position.x, -camera3.position.z, camera3.position.y];
+  const look = [controls.target.x, -controls.target.z, controls.target.y];
+  const kf = {
+    t: Number(clock.t.toFixed(3)),
+    pos: pos.map((v) => Number(v.toFixed(3))),
+    lookat: look.map((v) => Number(v.toFixed(3))),
+  };
+  const kfs = [...(cameraPaths[name] || []), kf].sort((a, b) => a.t - b.t);
+  try {
+    await api(`/api/sim/cameras/${encodeURIComponent(name)}/path`, {
+      method: "POST",
+      body: JSON.stringify({ keyframes: kfs }),
+    });
+    cameraPaths[name] = kfs;
+    toast(`keyframe at t=${kf.t}s -> ${name}`);
+    refreshCameras();
+  } catch (err) { toast(err.message, true); }
+}
+async function removeKeyframe(name, idx) {
+  const kfs = [...(cameraPaths[name] || [])];
+  kfs.splice(idx, 1);
+  try {
+    if (kfs.length) {
+      await api(`/api/sim/cameras/${encodeURIComponent(name)}/path`, {
+        method: "POST",
+        body: JSON.stringify({ keyframes: kfs }),
+      });
+    } else {
+      await api(`/api/sim/cameras/${encodeURIComponent(name)}/path/clear`, { method: "POST", body: "{}" });
+    }
+    cameraPaths[name] = kfs;
+    refreshCameras();
+  } catch (err) { toast(err.message, true); }
+}
+
+// ---- asset presets --------------------------------------------------------
+async function loadAssets() {
+  const el = document.getElementById("assetList");
+  try {
+    const { assets } = await api("/api/sim/assets");
+    if (!assets || !assets.length) { el.innerHTML = '<span class="dim">none</span>'; return; }
+    el.innerHTML = assets.map((a) => `<div class="tree-item" data-asset="${esc(a.id)}">${esc(a.name)} <span class="type">${a.category}</span></div>`).join("");
+    el.querySelectorAll("[data-asset]").forEach((n) => {
+      n.onclick = () => {
+        const a = assets.find((x) => x.id === n.dataset.asset);
+        if (!a) return;
+        document.getElementById("previewCode").value = a.script;
+        drawer.classList.add("open");
+        document.getElementById("previewResult").innerHTML = `<span class="dim">asset “${esc(a.name)}” loaded — press run preview</span>`;
+      };
+    });
+  } catch (err) {
+    el.innerHTML = `<span class="err">${esc(err.message)}</span>`;
+  }
+}
+
+// ---- boot ----------------------------------------------------------------------------
+async function refreshAll() {
+  await refreshScene();
+  refreshCameras();
+  refreshEstop();
+  loadAssets();
+}
+refreshAll();
+loadMesh();
+connectStream();
+setInterval(refreshEstop, 4000);
+setInterval(refreshScene, 10000);
+</script>
+</body>
+</html>

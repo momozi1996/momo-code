@@ -1,0 +1,17 @@
+#!/bin/sh
+# momo-code quality gate: pre-commit
+# Runs the TypeScript typecheck. Bypass with: git commit --no-verify
+
+echo "[quality-gate] pre-commit: typechecking packages/opencode..."
+
+cd packages/opencode || exit 1
+
+if ! npx tsc --noEmit; then
+  echo ""
+  echo "[quality-gate] FAILED: typecheck errors. Commit blocked."
+  echo "[quality-gate] Fix the errors above, or bypass with --no-verify (not recommended)."
+  exit 1
+fi
+
+echo "[quality-gate] typecheck OK"
+exit 0

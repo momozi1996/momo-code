@@ -185,7 +185,7 @@ for (const item of targets) {
       windows: {},
     },
     files: embeddedFileMap ? { "momo-web-ui.gen.ts": embeddedFileMap } : {},
-    entrypoints: ["./src/index.ts", parserWorker, workerPath, ...(embeddedFileMap ? ["momo-web-ui.gen.ts"] : [])],
+    entrypoints: ["./src/cli/main.ts", parserWorker, workerPath, ...(embeddedFileMap ? ["momo-web-ui.gen.ts"] : [])],
     define: {
       FFF_LIBC: JSON.stringify(item.abi === "musl" ? "musl" : "gnu"),
       MOMO_VERSION: `'${Script.version}'`,

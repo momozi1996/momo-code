@@ -47,13 +47,16 @@
     "bin/",
     "dist/",
     "scripts/",
+    "python/",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "npx tsx --test src/test/tactic.test.ts src/test/provider.test.ts",
+    "test": "npx tsx --test src/test/*.test.ts",
     "build": "tsc && node scripts/fix-esm.mjs",
+    "build:exe": "bun build --compile --outfile=momo.exe src/main.ts",
+    "build:all": "bun run script/build-all.ts",
     "dev": "tsc --watch",
     "lint": "echo 'oxlint not installed'",
     "start": "node bin/momo",

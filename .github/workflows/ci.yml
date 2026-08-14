@@ -15,5 +15,9 @@ jobs:
         with:
           node-version: 20
       - run: cd packages/opencode && npm install
-      - run: cd packages/opencode && npm run build
-      - run: cd packages/opencode && npm test
+      - name: Quality gate — typecheck
+        run: cd packages/opencode && npm run typecheck
+      - name: Quality gate — build
+        run: cd packages/opencode && npm run build
+      - name: Quality gate — tests
+        run: cd packages/opencode && npm test

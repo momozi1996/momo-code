@@ -46,6 +46,12 @@ export const ENV_NAMES = {
   /** Disable Claude Code settings inheritance. */
   NO_CLAUDE_SETTINGS: "MOMO_NO_CLAUDE_SETTINGS",
 
+  /** Enable CC Switch provider inheritance. */
+  CC_SWITCH_INHERIT: "MOMO_CC_SWITCH_INHERIT",
+
+  /** Disable CC Switch provider inheritance. */
+  NO_CC_SWITCH: "MOMO_NO_CC_SWITCH",
+
   /** OpenRouter API key. */
   OPENROUTER_API_KEY: "MOMO_OPENROUTER_API_KEY",
 
@@ -117,6 +123,57 @@ export const ENV_NAMES = {
 
   /** Session ID for resuming conversations. */
   SESSION_ID: "MOMO_SESSION_ID",
+
+  /** Disable session trajectory recording when set to 'false'. */
+  SESSION_RECORD: "MOMO_SESSION_RECORD",
+
+  /** Current subagent recursion depth (set automatically). */
+  RLM_DEPTH: "MOMO_RLM_DEPTH",
+
+  /** Maximum subagent recursion depth (default: 3). */
+  RLM_MAX_DEPTH: "MOMO_RLM_MAX_DEPTH",
+
+  /** Maximum subagents per orchestration run (default: 8). */
+  RLM_BUDGET: "MOMO_RLM_BUDGET",
+
+  /** Per-subagent timeout in ms (default: 300000). */
+  RLM_TIMEOUT_MS: "MOMO_RLM_TIMEOUT_MS",
+
+  /** Daemon poll interval in seconds (default: 60). */
+  DAEMON_INTERVAL: "MOMO_DAEMON_INTERVAL",
+
+  /** Stop the daemon after N heartbeat passes. */
+  DAEMON_MAX_RUNS: "MOMO_DAEMON_MAX_RUNS",
+
+  /** Stop the daemon after N hours (default: 24). */
+  DAEMON_MAX_HOURS: "MOMO_DAEMON_MAX_HOURS",
+
+  /** Python executable for the Genesis world server. */
+  SIM_PYTHON: "MOMO_SIM_PYTHON",
+
+  /** Override path of the genesis_world server script. */
+  SIM_SERVER: "MOMO_SIM_SERVER",
+
+  /** Max LLM control-loop steps for /sim run (default: 20). */
+  SIM_MAX_STEPS: "MOMO_SIM_MAX_STEPS",
+
+  /** Genesis backend for simulation: cpu or gpu (default: cpu). */
+  SIM_BACKEND: "MOMO_SIM_BACKEND",
+
+  /** Python executable for voice recording. */
+  VOICE_PYTHON: "MOMO_VOICE_PYTHON",
+
+  /** Default voice recording length in seconds (default: 5). */
+  VOICE_SECONDS: "MOMO_VOICE_SECONDS",
+
+  /** STT (speech-to-text) API key for /voice. */
+  STT_API_KEY: "MOMO_STT_API_KEY",
+
+  /** STT base URL (default: https://api.openai.com/v1). */
+  STT_BASE_URL: "MOMO_STT_BASE_URL",
+
+  /** STT model (default: whisper-1). */
+  STT_MODEL: "MOMO_STT_MODEL",
 } as const
 
 /**

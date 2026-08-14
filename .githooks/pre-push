@@ -1,0 +1,17 @@
+#!/bin/sh
+# momo-code quality gate: pre-push
+# Runs the full test suite before any push. Bypass with: git push --no-verify
+
+echo "[quality-gate] pre-push: running full test suite..."
+
+cd packages/opencode || exit 1
+
+if ! npx tsx --test src/test/*.test.ts; then
+  echo ""
+  echo "[quality-gate] FAILED: tests are red. Push blocked."
+  echo "[quality-gate] Fix the failures above, or bypass with --no-verify (not recommended)."
+  exit 1
+fi
+
+echo "[quality-gate] all tests green"
+exit 0

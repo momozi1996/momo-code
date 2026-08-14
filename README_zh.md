@@ -22,20 +22,20 @@
 <br/>
 
 <!-- 导航图标，URL占位和英文文档统一 -->
-<a href="##WEBSITE_URL##" target="_blank">
-  <img src="https://cdn.jsdelivr.net/npm/simple-icons@v10/icons/web.svg" width="24" alt="官方网站"/>
+<a href="https://momozi.cc" target="_blank">
+  <img src="https://img.shields.io/badge/website-momozi.cc-blue" alt="官方网站"/>
 </a>
 &nbsp;&nbsp;
-<a href="##HF_URL##" target="_blank">
-  <img src="https://cdn.jsdelivr.net/npm/simple-icons@v10/icons/huggingface.svg" width="24" alt="Hugging Face"/>
+<a href="https://huggingface.co/momozi" target="_blank">
+  <img src="https://cdn.jsdelivr.net/npm/simple-icons@v12/icons/huggingface.svg" width="24" alt="Hugging Face"/>
 </a>
 &nbsp;&nbsp;
 <a href="./README.md" target="_self">
-  <img src="https://cdn.jsdelivr.net/npm/simple-icons@v10/icons/translate.svg" width="24" alt="切换英文"/>
+  <img src="https://img.shields.io/badge/docs-EN-orange" alt="English"/>
 </a>
 <p>
-  <a href="##WEBSITE_URL##">官方网站</a> · 
-  <a href="##HF_URL##">Hugging Face</a> · 
+  <a href="https://momozi.cc">官方网站</a> · 
+  <a href="https://huggingface.co/momozi">Hugging Face</a> · 
   <a href="./README.md">English Docs</a>
 </p>
 </div>
@@ -64,6 +64,7 @@ AI 驱动的智能编程代理，随你的开发持续进化。
 - 模型分级：零配置切换 `ultra` / `standard` / `lite` 三档模型
 - 秒级快速经验进化 `/evolve`：基于 KEP 知识嵌入协议实现提示词注入，通过汤普森采样自动筛选高成功率开发策略
 - 小时级自主微调训练 `/fine-tune`：蒙特卡洛图搜索(MCGS)+LoRA 轻量化微调持续优化模型权重
+- 图引擎多智能体编排 `/graph`：LLM 自动规划任务 DAG，自动创建多个子 agent 并行执行、失败重试、断点续跑，支持长程任务（可混入 `/sim` 仿真子 agent）
 - 完美兼容 Claude Code：无缝迁移，自动复用 `.claude/` 配置、MCP 服务、自定义提示词
 - 本地优先：所有代码数据留存本地，开源可审计，无数据外漏风险
 - Effect 架构驱动：可组合、类型安全的标准化代码实现
@@ -88,7 +89,7 @@ npm run build
 
 ### macOS / Linux 一键快速安装
 ```bash
-curl -fsSL https://momocode.cc/install | bash
+curl -fsSL https://momozi.cc/install | bash
 ```
 
 ## 快速上手
@@ -186,7 +187,7 @@ momo models providers    # 查看全部可用服务商
 ### 主配置文件 `~/.momo/momo.jsonc`
 ```json
 {
-  "$schema": "https://momocode.cc/config.json",
+  "$schema": "https://momozi.cc/config.json",
   "model": "standard",
   "provider": "anthropic",
   "inheritClaudeCode": true,

@@ -1,0 +1,68 @@
+name: Build Cross-Platform Executables
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: bun-linux-x64
+            output: momo-linux-x64
+          - os: ubuntu-latest
+            target: bun-linux-arm64
+            output: momo-linux-arm64
+          - os: macos-latest
+            target: bun-darwin-arm64
+            output: momo-macos-arm64
+          - os: macos-13
+            target: bun-darwin-x64
+            output: momo-macos-x64
+          - os: windows-latest
+            target: bun-windows-x64
+            output: momo-windows-x64.exe
+          - os: windows-latest
+            target: bun-windows-arm64
+            output: momo-windows-arm64.exe
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: bun install
+        working-directory: packages/opencode
+
+      - name: Build executable
+        run: bun build --compile --target=${{ matrix.target }} --outfile=${{ matrix.output }} src/main.ts
+        working-directory: packages/opencode
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.output }}
+          path: packages/opencode/${{ matrix.output }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*

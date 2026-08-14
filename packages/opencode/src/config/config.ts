@@ -8,6 +8,7 @@ import { Effect, Config as EffectConfig, Layer } from "effect"
 import os from "os"
 import path from "path"
 import fs from "fs"
+import { loadActiveCcSwitchProvider } from "../provider/cc-switch.js"
 
 /** Configuration directory name for momo Code. */
 export const CONFIG_DIR_NAME = ".momo"
@@ -74,6 +75,9 @@ export interface UserConfig {
 
   /** Whether to inherit Claude Code settings. */
   readonly inheritClaudeSettings?: boolean
+
+  /** Whether to inherit CC Switch active provider configuration. */
+  readonly inheritCcSwitch?: boolean
 
   /** Theme setting. */
   readonly theme?: "dark" | "light" | "system"
@@ -144,6 +148,17 @@ export function loadUserConfig(): Effect.Effect<UserConfig, Error> {
 }
 
 /**
+ * Determine whether CC Switch inheritance is enabled.
+ * Order of precedence: env > user config > default (true).
+ */
+function isCcSwitchEnabled(config: UserConfig): boolean {
+  if (process.env.MOMO_NO_CC_SWITCH === "true") return false
+  if (process.env.MOMO_CC_SWITCH_INHERIT === "false") return false
+  if (config.inheritCcSwitch === false) return false
+  return true
+}
+
+/**
  * Ensure the configuration directory exists.
  */
 export function ensureConfigDir(): Effect.Effect<void, Error> {
@@ -163,7 +178,35 @@ export function ensureConfigDir(): Effect.Effect<void, Error> {
  */
 export class Config extends Effect.Service<Config>()("Config", {
   effect: Effect.gen(function* () {
-    const userConfig = yield* loadUserConfig()
+    let userConfig = yield* loadUserConfig()
+
+    // Merge CC Switch active provider into config (momo.jsonc still wins).
+    // momo is opencode-based, so the opencode provider takes precedence over
+    // the claude provider when both are configured in CC Switch.
+    if (isCcSwitchEnabled(userConfig)) {
+      for (const appType of ["opencode", "claude"] as const) {
+        const ccProvider = yield* Effect.promise(() =>
+          loadActiveCcSwitchProvider(appType),
+        )
+        if (!ccProvider) continue
+        const existing = userConfig.providers?.[ccProvider.providerName] || {}
+        userConfig = {
+          ...userConfig,
+          provider: userConfig.provider || ccProvider.providerName,
+          model: userConfig.model || ccProvider.model,
+          providers: {
+            ...userConfig.providers,
+            [ccProvider.providerName]: {
+              ...existing,
+              apiKey: existing.apiKey || ccProvider.apiKey,
+              baseUrl: existing.baseUrl || ccProvider.baseUrl,
+              defaultModel: existing.defaultModel || ccProvider.model,
+            },
+          },
+        }
+        break
+      }
+    }
 
     /** Get a config value with fallback. */
     const get = <T>(

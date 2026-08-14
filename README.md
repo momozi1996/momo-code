@@ -19,15 +19,15 @@
 
 <p>
 <a href="https://momozi.cc" target="_blank">
-  <img src="https://momozi.cc/favicon.ico" width="24" alt="官方网站">
+  <img src="https://img.shields.io/badge/website-momozi.cc-blue" alt="Website">
 </a>
  
 <a href="https://huggingface.co/momozi" target="_blank">
-  <img src="https://cdn.jsdelivr.net/npm/simple-icons@v10/icons/huggingface.svg" width="24" alt="Hugging Face">
+  <img src="https://cdn.jsdelivr.net/npm/simple-icons@v12/icons/huggingface.svg" width="24" alt="Hugging Face">
 </a>
  
-<a href="./README.md">
-  <img src="https://github.com/momozi1996/momo-code/blob/main/README_zh.md" width="24" alt="切换中文">
+<a href="./README_zh.md">
+  <img src="https://img.shields.io/badge/docs-%E4%B8%AD%E6%96%87-orange" alt="中文文档">
 </a>
 </p>
 </div>
@@ -68,6 +68,12 @@
 - **Model Tiers** — Zero-config selection: `ultra` / `standard` / `lite`
 - **Experience Fast Loop (`/evolve`)** — Second-level prompt injection via KEP protocol. Tactics distilled from success are auto-selected via Thompson sampling
 - **Self-Evolution Training (`/fine-tune`)** — Hour-level weight improvement via Monte Carlo Graph Search (MCGS) + LoRA
+- **Self-Refinement (`/refine`)** — Reviews session trajectories and proposes small, evidence-based improvements (tactics/prompt patches) that only take effect after human approval
+- **Recursive Subagents (`/agent`)** — RLM-style task decomposition: plan → parallel child processes → synthesis, with depth/budget rails
+- **Graph Engine (`/graph`)** — Long-horizon tasks as a resumable DAG of subagents: LLM-planned dependency graph, parallel execution, retries, and `/sim` world-agent nodes
+- **Long-Running Work (`/goal` + `/heartbeat` + `/daemon`)** — Persistent goals injected into every session, timed tasks, and a daemon loop for multi-hour autonomy
+- **Simulation Agent (`/sim`)** — LLM-driven control of a persistent Genesis physics world: the agent writes Python into a long-lived namespace (RLM-style), with skills-as-code loaded from `~/.momo/sim/skills/`
+- **Voice Input (`/voice`)** — Speak your prompt: mic recording (sounddevice) → OpenAI-compatible STT (Whisper/Groq) → coding session
 - **Claude Code Interop** — Seamless migration, inherits `.claude/` config, MCP servers, prompts
 - **Local-first** — Your code never leaves your machine. Open source, auditable
 - **Effect-powered** — Built with Effect for composable, type-safe code
@@ -232,6 +238,163 @@ momo /fine-tune status       # Check training status
 momo /fine-tune promote      # Promote candidate to production
 ```
 
+### Self-Refinement (`/refine`)
+
+Reviews recent session trajectories and proposes small, reviewable
+improvements. Nothing is applied without human approval.
+
+```bash
+momo /refine                 # Generate proposals from recent sessions
+momo /refine list            # List proposals
+momo /refine show <id>       # Inspect evidence + content
+momo /refine approve <id>    # Approve (review gate)
+momo /refine apply <id>      # Apply: tactic → draft, patch → prompt file
+momo /refine reject <id>     # Reject
+```
+
+### Recursive Subagents (`/agent`)
+
+RLM-style recursion: the model decomposes a complex task, subagents run
+as child `momo` processes (parallel where possible), and a synthesizer
+merges results.
+
+```bash
+momo /agent "Refactor the provider layer and update all callers and tests"
+```
+
+Rails: `MOMO_RLM_MAX_DEPTH` (3), `MOMO_RLM_BUDGET` (8), `MOMO_RLM_TIMEOUT_MS` (300000).
+
+### Graph Engine (`/graph`)
+
+Turns a long-horizon task into a **directed acyclic graph** of self-contained
+subagent tasks. The model plans the DAG (with real dependencies), nodes run as
+child `momo` processes — in parallel per topological level, with dependency
+outputs passed downstream — failed nodes retry, and a final LLM pass
+synthesizes the report. State persists to `~/.momo/graphs/<id>.json` after
+every batch, so runs survive restarts.
+
+```bash
+momo /graph run "Design + implement + test a persistence layer"   # plan → execute → synthesize
+momo /graph resume <id>        # Continue a long-horizon run where it stopped
+momo /graph status <id>        # Node states + outputs
+momo /graph list               # Recent runs
+```
+
+Nodes can be marked `"kind": "sim"` by the planner — those become simulation
+agents driving the Genesis world via `/sim run`, so a graph can mix coding
+subagents with physics experiments.
+
+Rails: `MOMO_GRAPH_MAX_NODES` (12), `MOMO_GRAPH_MAX_RETRIES` (2),
+`MOMO_GRAPH_CONCURRENCY` (defaults to `MOMO_RLM_BUDGET`).
+
+### Long-Running Work (`/goal`, `/schedule`, `/heartbeat`, `/daemon`)
+
+```bash
+momo /goal add "Ship v2.0" "with full test coverage"   # Persistent goal
+momo /goal list | log <id> "progress" | done <id>      # Manage goals
+momo /schedule add --every=60m "run tests and report"  # Timed task
+momo /schedule add --at=07:30 "daily standup summary"  # Daily task
+momo /heartbeat            # Run due tasks once
+momo /daemon               # Foreground loop (Ctrl+C to stop)
+```
+
+Active goals are injected into every chat session. The daemon is a
+foreground process by design — background it with nohup/systemd/Task
+Scheduler. Budget rails: `MOMO_DAEMON_MAX_RUNS`, `MOMO_DAEMON_MAX_HOURS` (24).
+
+### Simulation Agent (`/sim`)
+
+An LLM-driven agent that controls a persistent [Genesis](https://genesis-embodied-ai.github.io/)
+physics world. Requires Python with `genesis-world` installed
+(`pip install genesis-world`).
+
+```bash
+momo /sim doctor                      # Check python/genesis/provider setup
+momo /sim run "Stack the red cube on the blue cube"   # LLM control loop
+momo /sim run "<task>" --steps=40 --viewer            # Budget + live viewer
+momo /sim exec "print(42)"            # One-shot world REPL
+momo /sim exec --file=scene.py        # Run a script in a fresh world
+momo /sim skills                      # List installed world skills
+momo /sim eval --tasks=tasks.json     # Batch evaluation (fresh world per episode)
+```
+
+How it works: the CLI spawns a persistent Python process
+(`python/genesis_world/server.py`) holding a Genesis scene. Each loop
+step, the model replies with `{"thought": ..., "code": ...}`; the code
+runs in the persistent world namespace (`gs`, `scene`, `step(n)`, your
+variables survive across steps). Skills are plain `.py` files dropped
+into `~/.momo/sim/skills/` — auto-loaded into every world. Sim runs are
+recorded as trajectories, feeding the `/refine` self-improvement loop.
+
+Env: `MOMO_SIM_PYTHON`, `MOMO_SIM_BACKEND` (cpu/gpu),
+`MOMO_SIM_MAX_STEPS` (20), `MOMO_SIM_SERVER`.
+
+### Reasoning-Driven Optimization (`/optim`)
+
+Parameter tuning driven by **code understanding + explicit reasoning**
+(inspired by [optim-agent](https://optim-agent.github.io/optim-agent/)).
+The agent reads your code first and infers the physical/business meaning of
+every parameter, then proposes configurations with explicit `_reasoning` and
+a `_note` scratchpad fed forward across trials. Invalid proposals degrade to
+random sampling — a flaky agent can never crash a study.
+
+```bash
+momo /optim scan src/serve.py --param=threshold:0.05:0.95   # read code → semantic map
+momo /optim init quality --target=src/serve.py \
+  --param=threshold:0.05:0.95 --param=budget:10:200:int,log \
+  --metric=score --direction=max --cmd="python eval.py --threshold {threshold}"
+momo /optim semantics quality approve     # human review gate
+momo /optim run quality --trials=20       # reasoning-driven loop
+momo /optim history quality               # full reasoning trace
+```
+
+Evaluators: `--cmd` (business command, metric from stdout) or `--sim`
+(experiment in the Genesis world, ESTOP-honored). Studies persist under
+`~/.momo/optim/studies/<name>/` and resume automatically. See
+[docs/optim.md](docs/optim.md).
+
+Env: `MOMO_OPTIM_HISTORY` (5), `MOMO_OPTIM_N_INIT` (2), `MOMO_OPTIM_TIMEOUT` (300).
+
+### Local Server & Dashboard (`serve`)
+
+A zero-dependency local HTTP server that exposes momo's state as a JSON
+API + SSE live feed, with a single-file dashboard (no build step).
+
+```bash
+momo serve                      # http://127.0.0.1:4097 (dashboard at /)
+momo serve --port=8080 --token=s3cret
+```
+
+- API: `GET /api/sessions|goals|schedule`, `GET /api/optim/studies[/:name[/trials]]`,
+  `GET /api/sim/observe`, SSE `GET /api/optim/studies/:name/stream`
+- Actions: `POST /api/optim/studies/:name/run`, `POST /api/sim/estop|resume`, `POST /api/chat`
+- Dashboard tabs: Overview / Sessions / **Optim (live reasoning trace + best-so-far chart)** /
+  Sim (ESTOP control) / Schedule & Goals / Chat
+- Binds loopback by default; non-loopback requires `--token` (Bearer auth,
+  `?token=` fallback for browser EventSource)
+
+Env: `MOMO_SERVE_PORT` (4097), `MOMO_SERVE_HOST` (127.0.0.1), `MOMO_SERVE_TOKEN`.
+
+### Voice Input (`/voice`)
+
+Speak your prompt instead of typing. Requires `pip install sounddevice scipy`
+for recording, and an OpenAI-compatible speech-to-text endpoint.
+
+```bash
+momo /voice                       # Record 5s → transcribe → run as prompt
+momo /voice --seconds=10 --lang=zh
+momo /voice --file=meeting.mp3    # Transcribe an audio file → run
+momo /voice transcribe --file=x.wav  # Print transcription only
+```
+
+```bash
+export MOMO_STT_API_KEY=sk-...       # falls back to MOMO_OPENAI_API_KEY / MOMO_API_KEY
+export MOMO_STT_MODEL=whisper-1      # default
+# Groq (fast, generous free tier):
+export MOMO_STT_BASE_URL=https://api.groq.com/openai/v1
+export MOMO_STT_MODEL=whisper-large-v3
+```
+
 ### Models
 
 ```bash
@@ -246,7 +409,7 @@ momo models providers    # Show available providers
 
 ```jsonc
 {
-  "$schema": "https://momocode.cc/config.json",
+  "$schema": "https://momozi.cc/config.json",
   "model": "standard",
   "provider": "anthropic",
   "inheritClaudeCode": true,
@@ -363,6 +526,17 @@ export MOMO_ONLY=1
 | `MOMO_PROVIDER` | Default provider |
 | `MOMO_XP_MODE` | Evolution mode (balanced/explore/harden/convention-only) |
 | `MOMO_XP_DIR` | Experience storage dir |
+| `MOMO_SESSION_RECORD` | Set `false` to disable session trajectory recording |
+| `MOMO_RLM_MAX_DEPTH` | Subagent recursion limit (default: 3) |
+| `MOMO_RLM_BUDGET` | Max subagents per orchestration (default: 8) |
+| `MOMO_DAEMON_INTERVAL` | Daemon poll seconds (default: 60) |
+| `MOMO_DAEMON_MAX_RUNS` / `MOMO_DAEMON_MAX_HOURS` | Daemon budget rails |
+| `MOMO_SIM_PYTHON` | Python executable for the sim world server |
+| `MOMO_SIM_BACKEND` | Genesis backend: cpu or gpu (default: cpu) |
+| `MOMO_SIM_MAX_STEPS` | Max LLM control-loop steps (default: 20) |
+| `MOMO_STT_API_KEY` | STT key for /voice (OpenAI-compatible) |
+| `MOMO_STT_BASE_URL` / `MOMO_STT_MODEL` | STT endpoint/model (default: OpenAI whisper-1) |
+| `MOMO_VOICE_SECONDS` | Default voice recording length (default: 5) |
 | `MOMO_EVOLVE_ENABLED` | Enable self-evolution |
 | `MOMO_EVOLVE_BUDGET_USD` | Training budget |
 | `MOMO_ANTHROPIC_API_KEY` | Anthropic key |

@@ -11,14 +11,17 @@
 
 # MOMO CODE 🔥v1.0.0
 <div align="center">
+
 <!-- 开源标准状态徽章 -->
+
 [![发布版本](https://img.shields.io/github/v/release/momozi1996/momo-code?label=Release&color=orange)](https://github.com/momozi1996/momo-code/releases)
 [![Star收藏](https://img.shields.io/github/stars/momozi1996/momo-code?style=flat)](https://github.com/momozi1996/momo-code/stargazers)
 [![Fork分支](https://img.shields.io/github/forks/momozi1996/momo-code)](https://github.com/momozi1996/momo-code/forks)
 [![开源协议](https://img.shields.io/github/license/momozi1996/momo-code)](./LICENSE)
-[![TypeScript](https://img.shields.io/badge/TypeScript-5.0+-blue)](https://www.typescriptlang.org/)
-[![NPM包版本](https://img.shields.io/npm/v/@momo/cli)](https://www.npmjs.com/package/@momo/cli)
+[![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue)](https://www.typescriptlang.org/)
+[![NPM包版本](https://img.shields.io/npm/v/%40momo%2Fcli)](https://www.npmjs.com/package/@momo/cli)
 
+</div>
 <br/>
 
 <!-- 导航图标，URL占位和英文文档统一 -->

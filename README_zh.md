@@ -20,6 +20,7 @@
 [![开源协议](https://img.shields.io/github/license/momozi1996/momo-code)](./LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue)](https://www.typescriptlang.org/)
 [![NPM包版本](https://img.shields.io/npm/v/%40momo%2Fcli)](https://www.npmjs.com/package/@momo/cli)
+[![AtomGIt Star](您的项目链接/star/badge.svg)](您的项目链接)
 
 </div>
 <br/>

@@ -20,7 +20,7 @@
 [![开源协议](https://img.shields.io/github/license/momozi1996/momo-code)](./LICENSE)
 [![TypeScript](https://img.shields.io/badge/TypeScript-5.0%2B-blue)](https://www.typescriptlang.org/)
 [![NPM包版本](https://img.shields.io/npm/v/%40momo%2Fcli)](https://www.npmjs.com/package/@momo/cli)
-[![AtomGIt Star](https://atomgit.com/weixin_43172152/momo-code/star/badge.svg)](https://atomgit.com/weixin_43172152/momo-code)
+[![AtomGIt Star](https://atomgit.com/momozi1996/momo-code/star/badge.svg)](https://atomgit.com/momozi1996/momo-code)
 
 </div>
 <br/>

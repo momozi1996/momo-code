@@ -201,6 +201,9 @@ export async function chatComplete(opts: ChatOptions): Promise<string> {
 
     // Some providers reject `stream_options` with a 400 — retry once plain.
     if (response.status === 400 && wantUsage) {
+      // Release the rejected body without waiting for it to finish. Both
+      // attempts and their bodies share the original request deadline.
+      await response.body?.cancel().catch(() => {})
       const plainBody = JSON.stringify({
         model,
         messages: bodyMessages,
@@ -218,8 +221,6 @@ export async function chatComplete(opts: ChatOptions): Promise<string> {
         signal: controller.signal,
       })
     }
-
-    clearTimeout(timer)
 
     if (!response.ok) {
       const errorText = await response.text().catch(() => "")
@@ -264,11 +265,12 @@ export async function chatComplete(opts: ChatOptions): Promise<string> {
 
     return fullText
   } catch (err) {
-    clearTimeout(timer)
-    if (err instanceof Error && err.name === "AbortError") {
+    if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) {
       throw new Error(`Request timed out after ${timeout}ms`)
     }
     throw err
+  } finally {
+    clearTimeout(timer)
   }
 }
 

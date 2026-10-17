@@ -313,31 +313,31 @@ export async function executeGraph(
       break
     }
 
-    // 3. Nodes blocked by failed dependencies can never run — skip them.
-    for (const n of blockedNodes(run.nodes)) {
-      n.state = "skipped"
-      n.error = "blocked by failed dependency"
-      n.finishedAt = new Date().toISOString()
+    // 3. Skip blocked nodes. When idle, propagate skips until no more
+    //    nodes change, without consuming another rework attempt.
+    while (true) {
+      const blocked = blockedNodes(run.nodes)
+      for (const n of blocked) {
+        n.state = "skipped"
+        n.error = "blocked by failed dependency"
+        n.finishedAt = new Date().toISOString()
+      }
+
+      // Preserve batch/route ordering while work (including rework) is ready.
+      if (readyNodes(run.nodes).length > 0) break
+      const stuck = stuckDormantNodes(run.nodes)
+      for (const n of stuck) {
+        n.state = "skipped"
+        n.error = "condition never fired"
+        n.finishedAt = new Date().toISOString()
+      }
+      if (blocked.length === 0 && stuck.length === 0) break
     }
     saveRun(run)
 
     // 4. Run the next batch of ready nodes.
     const batch = readyNodes(run.nodes).slice(0, concurrency)
-    if (batch.length === 0) {
-      // Nothing ready: dormant targets whose sources are all terminal will
-      // never activate (e.g. a condition never fired) — finalize them.
-      const stuck = stuckDormantNodes(run.nodes)
-      if (stuck.length > 0) {
-        const now = new Date().toISOString()
-        for (const n of stuck) {
-          n.state = "skipped"
-          n.error = "condition never fired"
-          n.finishedAt = now
-        }
-        saveRun(run)
-      }
-      break
-    }
+    if (batch.length === 0) break
 
     if ((run.executions ?? 0) + batch.length > budget) {
       const now = new Date().toISOString()

@@ -3,9 +3,11 @@
  *
  * Execution model:
  *   1. Plan a graph of self-contained subagent tasks (LLM planner).
- *   2. Execute topologically: every batch of ready nodes runs as child
- *      `momo` processes in parallel (capped by concurrency), with the
- *      outputs of dependency nodes passed in as context.
+ *   2. Execute topologically: up to `concurrency` nodes run as child `momo`
+ *      processes at any time, with the outputs of dependency nodes passed in
+ *      as context. The scheduler is work-conserving — a completed node frees
+ *      its slot immediately, so dependents never wait behind unrelated
+ *      stragglers of the same batch.
  *   3. Graph Engineering primitives:
  *      - `kind: "approval"` nodes pause the run until a human approves or
  *        rejects them (`momo /graph approve|reject <id>` or the dashboard).
@@ -17,7 +19,7 @@
  *   4. Failed nodes retry (maxRetries), then nodes blocked by failed
  *      dependencies are skipped; a final LLM pass synthesizes the report.
  *   5. State (incl. structured `fields` + token usage) persists after every
- *      batch — `momo /graph resume <id>` continues where it stopped.
+ *      transition — `momo /graph resume <id>` continues where it stopped.
  *
  * @module graph/engine
  */
@@ -29,7 +31,6 @@ import {
   approvalNodes,
   blockedNodes,
   computeStatus,
-  isTerminal,
   pickDeterministicRoute,
   planToNodes,
   readyNodes,
@@ -192,25 +193,38 @@ function activateTarget(run: GraphRun, targetId: string, contextNote?: string): 
 }
 
 /** Evaluate a finished node's routes and activate the winning target. */
-async function evaluateRoutes(run: GraphRun, node: GraphNode): Promise<void> {
+async function evaluateRoutes(
+  run: GraphRun,
+  node: GraphNode,
+  defer: (targetId: string, activate: () => void) => void,
+): Promise<void> {
   if (node.routesFired || !node.routes || node.routes.length === 0) return
   node.routesFired = true
   const route = await decideRoute(node.routes, node, run)
-  if (route) activateTarget(run, route.to)
+  if (route) defer(route.to, () => activateTarget(run, route.to))
 }
 
 /** Route a failed node to its rework agent (bounded by MOMO_GRAPH_MAX_REWORK). */
-function routeFailure(run: GraphRun, node: GraphNode): void {
+function routeFailure(
+  run: GraphRun,
+  node: GraphNode,
+  defer: (targetId: string, activate: () => void) => void,
+): void {
   if (!node.rework) return
   const budget = defaultMaxRework()
   if ((node.reworkCount ?? 0) >= budget) return
   const target = run.nodes.find((n) => n.id === node.rework)
   if (!target) return
-  node.reworkCount = (node.reworkCount ?? 0) + 1
-  const note =
-    `Fix the failure from node "${node.id}" (${node.task}):\n` +
-    `${node.error ?? "unknown error"}`
-  activateTarget(run, target.id, note)
+  defer(target.id, () => {
+    // Budget is re-checked at activation time so two failures deferring onto
+    // the same fixer cannot together exceed the rework budget.
+    if ((node.reworkCount ?? 0) >= budget) return
+    node.reworkCount = (node.reworkCount ?? 0) + 1
+    const note =
+      `Fix the failure from node "${node.id}" (${node.task}):\n` +
+      `${node.error ?? "unknown error"}`
+    activateTarget(run, target.id, note)
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -269,7 +283,15 @@ async function runNode(node: GraphNode, run: GraphRun, timeoutMs: number): Promi
 // Execution loop
 // ---------------------------------------------------------------------------
 
-/** Execute all pending nodes of a run, persisting after every batch. */
+/**
+ * Execute all pending nodes of a run, persisting after every transition.
+ *
+ * Work-conserving scheduler: up to `concurrency` nodes stay in flight and
+ * every completion immediately re-routes dynamic edges, settles skips, and
+ * refills the freed slot. Nodes never wait for unrelated stragglers to
+ * finish, so makespan tracks the (concurrency-limited) critical path instead
+ * of the sum of per-batch slowest nodes.
+ */
 export async function executeGraph(
   run: GraphRun,
   opts: GraphRunOpts = {},
@@ -294,21 +316,74 @@ export async function executeGraph(
   saveRun(run)
   emitStatus(run, prevStatus, opts)
 
-  while (!isTerminal(run.nodes)) {
+  const inflight = new Map<string, Promise<void>>()
+  // Dynamic-edge activations (rework / route targets) that arrive while the
+  // target node is still executing — impossible under barrier batching, but
+  // routine under slot scheduling. Applied when the target lands.
+  const deferredActivations = new Map<string, Array<() => void>>()
+  let paused = false
+  // All scheduling decisions flow through pump(); completions enqueue onto
+  // this chain so pumps never interleave (no double-dispatch).
+  let pumpQueue: Promise<void> = Promise.resolve()
+
+  /** Run `activate` now, or when the still-running target node lands. */
+  const defer = (targetId: string, activate: () => void): void => {
+    if (inflight.has(targetId)) {
+      const list = deferredActivations.get(targetId) ?? []
+      list.push(activate)
+      deferredActivations.set(targetId, list)
+    } else {
+      activate()
+    }
+  }
+
+  /** Launch a node that was already marked running and counted. */
+  const launch = (node: GraphNode): void => {
+    const p = runNode(node, run, timeoutMs).then(() => {
+      inflight.delete(node.id)
+
+      // Apply dynamic-edge activations that arrived while this node ran
+      // (a rework loop or route may re-queue it immediately).
+      const deferred = deferredActivations.get(node.id)
+      if (deferred) {
+        deferredActivations.delete(node.id)
+        for (const activate of deferred) activate()
+      }
+
+      // Extract code artifacts from completed nodes to disk
+      if (node.state === "done" && node.output) {
+        const arts = extractArtifacts(run.id, node.id, node.output)
+        if (arts.length > 0) {
+          node.artifacts = arts.map((a) => ({ path: a.path, size: a.size }))
+        }
+      }
+      run.updatedAt = new Date().toISOString()
+      saveRun(run)
+      const idx = run.nodes.findIndex((x) => x.id === node.id)
+      opts.onNode?.(node, idx === -1 ? 0 : idx, total)
+      pumpQueue = pumpQueue.then(() => pump())
+    })
+    inflight.set(node.id, p)
+  }
+
+  const pump = async (): Promise<void> => {
+    if (paused) return
+
     // 1. Evaluate conditional edges for finished nodes, and route failures
     //    to rework agents (a rework loop re-runs only the failing path).
     for (const n of run.nodes) {
       if (n.state === "done" && !n.routesFired && n.routes?.length) {
-        await evaluateRoutes(run, n)
+        await evaluateRoutes(run, n, defer)
         saveRun(run)
       }
       if (n.state === "failed" && n.rework) {
-        routeFailure(run, n)
+        routeFailure(run, n, defer)
         saveRun(run)
       }
     }
 
-    // 2. Approval checkpoints pause the run for human review.
+    // 2. Approval checkpoints pause the run for human review. Skips do not
+    //    settle past a pause: dependents stay pending until the decision.
     const approvals = approvalNodes(run.nodes)
     if (approvals.length > 0) {
       const now = new Date().toISOString()
@@ -320,7 +395,8 @@ export async function executeGraph(
       run.updatedAt = now
       saveRun(run)
       emitStatus(run, prevStatus, opts)
-      break
+      paused = true
+      return
     }
 
     // 3. Skip blocked nodes. When idle, propagate skips until no more
@@ -345,49 +421,44 @@ export async function executeGraph(
     }
     saveRun(run)
 
-    // 4. Run the next batch of ready nodes.
-    const batch = readyNodes(run.nodes).slice(0, concurrency)
-    if (batch.length === 0) break
-
-    if ((run.executions ?? 0) + batch.length > budget) {
-      const now = new Date().toISOString()
-      for (const n of run.nodes) {
-        if (n.state === "pending") {
-          n.state = "skipped"
-          n.error = "execution budget exceeded"
-          n.finishedAt = now
+    // 4. Fill every free slot with ready work (one saveRun per fill).
+    const now = new Date().toISOString()
+    const toLaunch: GraphNode[] = []
+    while (inflight.size + toLaunch.length < concurrency) {
+      if ((run.executions ?? 0) + 1 > budget) {
+        // Execution budget exhausted: settle everything still pending.
+        const skipAt = new Date().toISOString()
+        for (const n of run.nodes) {
+          if (n.state === "pending") {
+            n.state = "skipped"
+            n.error = "execution budget exceeded"
+            n.finishedAt = skipAt
+          }
         }
+        run.updatedAt = skipAt
+        saveRun(run)
+        paused = true
+        return
       }
-      saveRun(run)
-      break
-    }
-
-    for (const n of batch) {
+      const ready = readyNodes(run.nodes)
+      if (ready.length === 0) break
+      const n = ready[0]
       n.state = "running"
-      n.startedAt = new Date().toISOString()
+      n.startedAt = now
+      run.executions = (run.executions ?? 0) + 1
+      toLaunch.push(n)
     }
-    saveRun(run)
-
-    await Promise.all(batch.map((n) => runNode(n, run, timeoutMs)))
-
-    // Extract code artifacts from completed nodes to disk
-    for (const n of batch) {
-      if (n.state === "done" && n.output) {
-        const arts = extractArtifacts(run.id, n.id, n.output)
-        if (arts.length > 0) {
-          n.artifacts = arts.map((a) => ({ path: a.path, size: a.size }))
-        }
-      }
+    if (toLaunch.length > 0) {
+      saveRun(run)
+      for (const n of toLaunch) launch(n)
     }
+  }
 
-    run.executions = (run.executions ?? 0) + batch.length
-    run.updatedAt = new Date().toISOString()
-    saveRun(run)
-
-    for (const n of batch) {
-      const idx = run.nodes.findIndex((x) => x.id === n.id)
-      opts.onNode?.(n, idx === -1 ? 0 : idx, total)
-    }
+  await pump()
+  for (;;) {
+    await pumpQueue
+    if (inflight.size === 0) break
+    await Promise.all([...inflight.values()])
   }
 
   if (run.status !== "waiting") {

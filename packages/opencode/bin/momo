@@ -7,7 +7,7 @@
  */
 
 import { spawn } from "child_process"
-import { readFileSync } from "fs"
+import { existsSync, readFileSync } from "fs"
 import { dirname, join } from "path"
 import { fileURLToPath } from "url"
 
@@ -91,6 +91,15 @@ function runLegacy(argv) {
 
 // ── Run Pi agent (REPL / print / json) ────────────────────────────
 async function runPiAgent(args) {
+  // Check for the built runtime up front: a dev checkout that has not run
+  // `npm run build` must fail loudly instead of being misreported as
+  // "Pi runtime not installed" and silently degrading to the native REPL.
+  if (!existsSync(join(__dirname, "..", "dist", "pi-runtime.js"))) {
+    console.error("\x1b[31mError:\x1b[0m Build output not found (dist/pi-runtime.js).")
+    console.error("Try: npm run build")
+    process.exit(1)
+  }
+
   try {
     const { InteractiveMode } = await import("@earendil-works/pi-coding-agent")
     const { createMomoRuntime, runMomoPrint } = await import("../dist/pi-runtime.js")
@@ -114,14 +123,15 @@ async function runPiAgent(args) {
 
 // ── Native REPL fallback (no Pi required) ─────────────────────────
 async function runNativeRepl(args) {
-  // Use tsx to run the TypeScript REPL directly
+  // Use tsx to run the TypeScript REPL directly. Spawn without a shell so
+  // prompts containing spaces survive argv intact (and no DEP0190 warning).
+  const npx = process.platform === "win32" ? "npx.cmd" : "npx"
   const tsx = spawn(
-    "npx",
+    npx,
     ["tsx", "src/repl/index.ts", args.mode, args.prompt || ""],
     {
       cwd: join(__dirname, ".."),
       stdio: "inherit",
-      shell: true,
     }
   )
 

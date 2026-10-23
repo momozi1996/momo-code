@@ -4,12 +4,18 @@
  *
  * Each candidate is one complete strategy document (hypothesis frontmatter
  * + prose/ts body). A population of K structurally-different candidates is
- * authored, each is evaluated by an independent worker subagent against the
+ * authored, each is evaluated by independent worker subagents against the
  * task's check command, and the leaderboard (passRate, then fewest errors)
  * seeds the next iteration:
  *
  *   author K candidates → evaluate → leaderboard (iter<N>/leaderboard.json)
  *   → eliminate losers into a ledger → top-3 seed the next iteration
+ *
+ * Evaluation is fail-fast racing over up to `MOMO_ASPIRE_EVO_TRIALS`
+ * attempts (default 3): every candidate runs once, a failure ends its run,
+ * each pass buys one confirmation trial. Fitness is passes/attempts, so a
+ * flaky pass can never reach the survivor pool or trigger "solved" — the
+ * confirmation budget is spent only on candidates that actually passed.
  *
  * Discipline ported from ASPIRE: every candidate records Hypothesis /
  * differs_from_prior (a structural difference, not a parameter tweak) /
@@ -53,8 +59,10 @@ export interface EvoCandidate {
   /** "novel" or the survivor names this candidate was seeded from. */
   seededFrom: string
   status: "pending" | "evaluated" | "eliminated"
+  /** passes / trials across the racing rounds (0..1). */
   passRate: number
   errors: number
+  /** Attempts actually run (fails stop early: passRate*trials = passes). */
   trials: number
   failures: { stage: string; reason: string }[]
 }
@@ -76,6 +84,7 @@ export interface EvoState {
 export type EvoEvent =
   | { kind: "iteration-start"; iteration: number; k: number }
   | { kind: "candidate-authored"; iteration: number; name: string; seededFrom: string }
+  | { kind: "candidate-attempt"; iteration: number; name: string; attempt: number; pass: boolean }
   | { kind: "candidate-evaluated"; iteration: number; name: string; pass: boolean; stage?: string; reason?: string }
   | { kind: "leaderboard"; iteration: number; best: string | null; bestPassRate: number }
   | { kind: "evosearch-done"; stopReason: StopReason; best: string | null; bestPassRate: number }
@@ -431,6 +440,11 @@ export function printEvoEvent(event: EvoEvent): void {
     case "candidate-authored":
       console.log(`${DIM}[evosearch] iter ${event.iteration}: candidate ${event.name} (seeded from ${event.seededFrom})${RESET}`)
       break
+    case "candidate-attempt":
+      console.log(
+        `${DIM}[evosearch] iter ${event.iteration}: ${event.name} attempt ${event.attempt} → ${event.pass ? "pass" : "fail"}${RESET}`,
+      )
+      break
     case "candidate-evaluated":
       console.log(
         `${DIM}[evosearch] iter ${event.iteration}: ${event.name} → ${event.pass ? "PASS" : `FAIL ${event.stage ?? ""} ${event.reason ?? ""}`}${RESET}`,
@@ -457,6 +471,8 @@ export interface RunEvosearchOpts {
   stateDir: string
   maxIterations?: number
   threshold?: number
+  /** Max attempts per candidate (fail-fast racing; default 3, min 1). */
+  trials?: number
   onEvent?: (event: EvoEvent) => void
   spawnRunner?: SpawnRunner
   author?: EvoAuthor
@@ -470,8 +486,9 @@ export interface RunEvosearchOpts {
  *    parsed from its failures;
  * 3. author K candidates (diversity rules enforced via the author prompt /
  *    AuthorRequest), write them as iter<N>/candidate_<X>.md;
- * 4. evaluate each candidate with an independent worker subagent (task
- *    check command = fitness; outcome.json, exit-code fallback);
+ * 4. evaluate each candidate with independent worker subagents (fail-fast
+ *    racing, up to `trials` attempts; task check command = fitness;
+ *    outcome.json, exit-code fallback);
  * 5. write iter<N>/leaderboard.json, keep the top-3 survivors.
  *
  * On completion: copies the best candidate to evosearch_best.md and writes
@@ -486,6 +503,9 @@ export async function runEvosearch(opts: RunEvosearchOpts): Promise<EvoState> {
     opts.threshold ?? (Number(process.env.MOMO_ASPIRE_EVO_THRESHOLD || 0.8) || 0.8)
   const maxIterations =
     opts.maxIterations ?? (Number(process.env.MOMO_ASPIRE_EVO_MAX_ITER || 5) || 5)
+  const trials = Math.max(1, Math.floor(
+    opts.trials ?? (Number(process.env.MOMO_ASPIRE_EVO_TRIALS || 3) || 3),
+  ))
   const concurrency =
     Number(process.env.MOMO_ASPIRE_CONCURRENCY || 2) || 2
   const taskTimeoutMs =
@@ -518,10 +538,15 @@ export async function runEvosearch(opts: RunEvosearchOpts): Promise<EvoState> {
     for (const c of state.candidates) {
       if (c.status !== "evaluated" || survivorNames.has(c.name)) continue
       c.status = "eliminated"
+      const passes = Math.round(c.passRate * c.trials)
       const reason =
-        c.failures.length > 0
-          ? c.failures.map((f) => `${f.stage}: ${f.reason}`).join("; ")
-          : "outperformed by survivors"
+        passes > 0
+          ? `unreliable: ${passes}/${c.trials} attempts passed — ${c.failures
+              .map((f) => `${f.stage}: ${f.reason}`)
+              .join("; ")}`
+          : c.failures.length > 0
+            ? c.failures.map((f) => `${f.stage}: ${f.reason}`).join("; ")
+            : "outperformed by survivors"
       state.eliminated.push({ hypothesis: c.hypothesis, reason, iteration })
     }
 
@@ -553,52 +578,98 @@ export async function runEvosearch(opts: RunEvosearchOpts): Promise<EvoState> {
     state.candidates.push(...batch)
     saveState(state)
 
-    // evaluate the population (matrix: candidate × this task, 1 trial each)
-    for (let i = 0; i < batch.length; i += concurrency) {
-      await Promise.all(
-        batch.slice(i, i + concurrency).map(async (candidate) => {
-          const evalDir = path.join(state.dir, `iter${iteration}`, `eval_${candidate.name}`)
-          fs.mkdirSync(evalDir, { recursive: true })
-          const promptFile = stageEvalPrompt(state, iteration, candidate, evalDir)
-          const result = await run(`candidate ${candidate.name} (iter ${iteration})`, {
-            args: [
-              // The eval dir is followed by a space on purpose — a trailing
-              // "." would leave `\S+` path parsers pointing at a dot-suffixed
-              // directory that does not exist.
-              `Read the file ${promptFile} and follow it exactly. Work only inside ${evalDir} and write outcome.json there before you finish.`,
-            ],
-            timeoutMs: taskTimeoutMs,
-          })
-          const errored = spawnErrored(result)
-          const outcome = readJson(path.join(evalDir, "outcome.json"))
-          const pass = errored
-            ? false
-            : isRecord(outcome) && typeof outcome.pass === "boolean"
-              ? outcome.pass
-              : result.exitCode === 0
-          const stage =
-            !pass && isRecord(outcome) && typeof outcome.stage === "string"
-              ? outcome.stage
-              : !pass
-                ? "check"
-                : undefined
-          const reason =
-            !pass && isRecord(outcome) && typeof outcome.reason === "string"
-              ? outcome.reason
-              : !pass
-                ? (result.output.slice(-200).trim() || "check command failed")
-                : undefined
+    // evaluate the population with fail-fast racing: every candidate gets
+    // one trial; a failure ends its run (eliminated, as before), a pass
+    // buys a confirmation trial — up to `trials` total. A flaky pass
+    // (passed once, failed a confirmation) can therefore never reach the
+    // survivor pool or trigger "solved"; the extra cost is paid only by
+    // candidates that actually passed.
+    const race: Array<{
+      candidate: EvoCandidate
+      passes: number
+      done: boolean
+    }> = batch.map((candidate) => ({ candidate, passes: 0, done: false }))
+    for (let attempt = 1; attempt <= trials; attempt++) {
+      const runnable = race.filter((r) => !r.done)
+      if (runnable.length === 0) break
+      for (let i = 0; i < runnable.length; i += concurrency) {
+        await Promise.all(
+          runnable.slice(i, i + concurrency).map(async (r) => {
+            const candidate = r.candidate
+            const evalDir = path.join(
+              state.dir,
+              `iter${iteration}`,
+              `eval_${candidate.name}`,
+              `attempt${attempt}`,
+            )
+            fs.mkdirSync(evalDir, { recursive: true })
+            const promptFile = stageEvalPrompt(state, iteration, candidate, evalDir)
+            const result = await run(`candidate ${candidate.name} (iter ${iteration})`, {
+              args: [
+                // The eval dir is followed by a space on purpose — a trailing
+                // "." would leave `\S+` path parsers pointing at a dot-suffixed
+                // directory that does not exist.
+                `Read the file ${promptFile} and follow it exactly. Work only inside ${evalDir} and write outcome.json there before you finish.`,
+              ],
+              timeoutMs: taskTimeoutMs,
+            })
+            const errored = spawnErrored(result)
+            const outcome = readJson(path.join(evalDir, "outcome.json"))
+            const pass = errored
+              ? false
+              : isRecord(outcome) && typeof outcome.pass === "boolean"
+                ? outcome.pass
+                : result.exitCode === 0
+            const stage =
+              !pass && isRecord(outcome) && typeof outcome.stage === "string"
+                ? outcome.stage
+                : !pass
+                  ? "check"
+                  : undefined
+            const reason =
+              !pass && isRecord(outcome) && typeof outcome.reason === "string"
+                ? outcome.reason
+                : !pass
+                  ? (result.output.slice(-200).trim() || "check command failed")
+                  : undefined
 
-          candidate.status = "evaluated"
-          candidate.trials = 1
-          candidate.passRate = pass ? 1 : 0
-          candidate.errors = errored ? 1 : 0
-          candidate.failures = pass
-            ? []
-            : [{ stage: stage ?? "unknown", reason: reason ?? "check command failed" }]
-          emit({ kind: "candidate-evaluated", iteration, name: candidate.name, pass, stage, reason })
-        }),
-      )
+            r.done = !pass
+            if (pass) r.passes++
+            if (errored) candidate.errors++
+            if (!pass) {
+              candidate.failures.push({
+                stage: stage ?? "unknown",
+                reason: reason ?? "check command failed",
+              })
+            }
+            emit({
+              kind: "candidate-attempt",
+              iteration,
+              name: candidate.name,
+              attempt,
+              pass,
+            })
+          }),
+        )
+      }
+    }
+    for (const r of race) {
+      const candidate = r.candidate
+      candidate.status = "evaluated"
+      candidate.trials = candidate.failures.length + r.passes
+      candidate.passRate = candidate.trials > 0 ? r.passes / candidate.trials : 0
+      const firstFailure = candidate.failures[0]
+      emit({
+        kind: "candidate-evaluated",
+        iteration,
+        name: candidate.name,
+        pass: candidate.failures.length === 0,
+        stage: firstFailure?.stage,
+        reason:
+          candidate.failures.length > 0 && r.passes > 0
+            ? `unreliable: ${r.passes}/${candidate.trials} attempts passed`
+            : firstFailure?.reason,
+      })
     }
 
     // leaderboard for this iteration

@@ -282,4 +282,44 @@ describe("graph execution skip propagation", () => {
     assert.strictEqual(run.status, "partial")
     assert.deepStrictEqual(loadRun(run.id), JSON.parse(JSON.stringify(run)))
   })
+
+  it("starts dependent work as soon as a slot frees instead of waiting for the batch", async () => {
+    // slow(2s) runs in parallel with quick(100ms); `after` depends only on
+    // quick. A barrier scheduler holds `after` until slow lands too; a
+    // work-conserving scheduler starts it the moment quick finishes.
+    const fixture = path.join(tmp, "scheduler-child.cjs")
+    fs.writeFileSync(fixture, `
+      const task = process.argv[2]
+      const m = /sleep-(\\d+)ms/.exec(task)
+      if (m) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, Number(m[1]))
+      console.log(task + " ok")
+    `)
+    const run = makeRun({ nodes: [
+      { id: "slow", task: "slow sleep-2000ms" },
+      { id: "quick", task: "quick sleep-100ms" },
+      { id: "after", task: "after sleep-100ms", dependsOn: ["quick"] },
+    ] })
+    const originalEntry = process.argv[1]
+    const originalDepth = process.env.MOMO_RLM_DEPTH
+    try {
+      process.argv[1] = fixture
+      process.env.MOMO_RLM_DEPTH = "0"
+      await executeGraph(run, { concurrency: 2, timeoutMs: 15_000 })
+    } finally {
+      process.argv[1] = originalEntry
+      if (originalDepth === undefined) delete process.env.MOMO_RLM_DEPTH
+      else process.env.MOMO_RLM_DEPTH = originalDepth
+    }
+
+    const byId = new Map(run.nodes.map((n) => [n.id, n]))
+    const startedAt = (id: string) => Date.parse(byId.get(id)!.startedAt!)
+    const finishedAt = (id: string) => Date.parse(byId.get(id)!.finishedAt!)
+    assert.strictEqual(run.status, "done")
+    assert.ok(run.nodes.every((n) => n.state === "done"))
+    // The dependency edge is respected: `after` starts after `quick` lands.
+    assert.ok(startedAt("after") >= finishedAt("quick"))
+    // Work conservation: `after` ran while `slow` was still in flight (a
+    // 800ms margin against spawn jitter on loaded CI runners).
+    assert.ok(startedAt("after") + 800 < finishedAt("slow"))
+  })
 })

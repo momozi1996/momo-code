@@ -63,6 +63,15 @@ function childEnv() {
 }
 
 before(async () => {
+  // These tests drive `bin/momo`, whose Pi runtime loads from dist/. Without a
+  // prior `npm run build` the CLI silently degrades to the native REPL and
+  // every lifecycle assertion below fails with opaque "Missing expected
+  // rejection" errors — fail fast with the actionable message instead.
+  if (!fs.existsSync(path.join(packageDir, "dist", "pi-runtime.js"))) {
+    assert.fail(
+      "dist/pi-runtime.js not found — run `npm run build` before the pi-cli tests",
+    )
+  }
   tmp = fs.mkdtempSync(path.join(os.tmpdir(), "momo-pi-cli-"))
   configDir = path.join(tmp, ".momo")
   fs.mkdirSync(configDir)

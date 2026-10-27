@@ -104,6 +104,36 @@ function makeFakeRunner(
   return { runner, evals }
 }
 
+/** Like makeFakeRunner, but the script sees the racing attempt number. */
+function makeAttemptRunner(
+  decide: (iteration: number, name: string, attempt: number) => { pass: boolean; stage?: string; reason?: string },
+): { runner: SpawnRunner; evals: Array<{ iteration: number; name: string; attempt: number }> } {
+  const evals: Array<{ iteration: number; name: string; attempt: number }> = []
+  const runner: SpawnRunner = async (task, spawnOpts) => {
+    const instruction = spawnOpts.args?.[0] ?? ""
+    const fileMatch = /Read the file (\S+) and/.exec(instruction)
+    const dirMatch = /Work only inside (\S+)/.exec(instruction)
+    const nameMatch = /candidate_([A-Z]+\d*)_PROMPT\.md/.exec(instruction)
+    const iterMatch = /iter(\d+)/.exec(instruction)
+    const attemptMatch = /attempt(\d+)/.exec(dirMatch?.[1] ?? "")
+    if (!fileMatch || !dirMatch || !nameMatch || !iterMatch || !attemptMatch) {
+      throw new Error(`fake runner: cannot parse instruction: ${instruction}`)
+    }
+    const iteration = Number(iterMatch[1])
+    const name = nameMatch[1]
+    const attempt = Number(attemptMatch[1])
+    evals.push({ iteration, name, attempt })
+    const outcome = decide(iteration, name, attempt)
+    fs.mkdirSync(dirMatch[1], { recursive: true })
+    fs.writeFileSync(
+      path.join(dirMatch[1], "outcome.json"),
+      JSON.stringify({ pass: outcome.pass, stage: outcome.stage, reason: outcome.reason }),
+    )
+    return fakeResult(task, outcome.pass ? 0 : 1)
+  }
+  return { runner, evals }
+}
+
 function candidate(partial: Partial<EvoCandidate> & { name: string }): EvoCandidate {
   return {
     codePath: `iter1/candidate_${partial.name}.md`,
@@ -195,10 +225,15 @@ describe("skill/evosearch runEvosearch (fake author + runner)", () => {
 
     assert.strictEqual(final.stopReason, "solved")
     assert.strictEqual(final.iteration, 1)
+    // fail-fast racing: B and C stop after their failing first attempt;
+    // A confirms its pass with two extra attempts (default trials = 3)
     assert.deepStrictEqual(
       evals.map((e) => e.name).sort(),
-      ["A", "B", "C"],
+      ["A", "A", "A", "B", "C"],
     )
+    const a = final.candidates.find((c) => c.name === "A")!
+    assert.strictEqual(a.trials, 3)
+    assert.strictEqual(a.passRate, 1)
 
     // best candidate copied + report written
     const best = fs.readFileSync(path.join(state.dir, "evosearch_best.md"), "utf-8")
@@ -323,6 +358,96 @@ describe("skill/evosearch runEvosearch (fake author + runner)", () => {
       evals.map((e) => e.name).sort(),
       ["A", "A2", "B", "B2"],
     )
+  })
+
+  it("racing filters flaky passes: one pass then a fail is not 'solved'", async () => {
+    useHome()
+    const state = initEvosearch({ task: TASK, k: 4 })
+    const { author } = makeFakeAuthor()
+    // iter1 A: attempt 1 passes, attempt 2 fails → unreliable (1/2 = 0.5).
+    // iter1 B/C/D: pass attempts 1-2, fail attempt 3 → 2/3 ≈ 0.67 — above A,
+    // below the 0.8 threshold, so the run continues without "solved".
+    // iter2 candidates: fail immediately.
+    const { runner, evals } = makeAttemptRunner((iter, name, attempt) => {
+      if (iter === 2) return { pass: false, stage: "impl", reason: "regressed" }
+      if (name === "A") {
+        return attempt === 1
+          ? { pass: true }
+          : { pass: false, stage: "impl", reason: "flaky strategy" }
+      }
+      return attempt <= 2
+        ? { pass: true }
+        : { pass: false, stage: "impl", reason: "not repeatable" }
+    })
+    const events: EvoEvent[] = []
+
+    const final = await runEvosearch({
+      stateDir: state.dir,
+      threshold: 0.8,
+      maxIterations: 2,
+      author,
+      spawnRunner: runner,
+      onEvent: (e) => events.push(e),
+    })
+
+    // The flaky first-attempt pass never triggers the solved stop condition.
+    assert.strictEqual(final.stopReason, "max-iterations")
+    const a = final.candidates.find((c) => c.name === "A")!
+    assert.strictEqual(a.trials, 2)
+    assert.strictEqual(a.passRate, 0.5)
+    assert.deepStrictEqual(a.failures, [{ stage: "impl", reason: "flaky strategy" }])
+    // The reliable-but-imperfect majority pushed A out of the survivor set;
+    // its ledger entry tells the author the pass was unreliable
+    assert.strictEqual(a.status, "eliminated")
+    const ledgerA = final.eliminated.find((e) => e.hypothesis === a.hypothesis)
+    assert.match(ledgerA!.reason, /unreliable: 1\/2 attempts passed/)
+    // 2/3 candidates ran all three attempts and survive at 2/3
+    const b = final.candidates.find((c) => c.name === "B")!
+    assert.strictEqual(b.trials, 3)
+    assert.strictEqual(b.passRate, 2 / 3)
+    assert.strictEqual(b.status, "evaluated")
+    // The evaluated verdict for A reports the failure with the reliability note
+    const evaluated = events.find(
+      (e) => e.kind === "candidate-evaluated" && (e as { name: string }).name === "A",
+    ) as { reason?: string }
+    assert.match(evaluated.reason!, /unreliable: 1\/2 attempts passed/)
+    // attempt-level progress events were emitted (A stops after 2 attempts)
+    const aAttempts = events.filter(
+      (e) => e.kind === "candidate-attempt" && (e as { name: string }).name === "A",
+    )
+    assert.strictEqual(aAttempts.length, 2)
+    // and the racing order is visible in the runner calls
+    assert.deepStrictEqual(
+      evals.filter((e) => e.name === "A").map((e) => e.attempt),
+      [1, 2],
+    )
+  })
+
+  it("trials: 1 keeps the historical single-attempt evaluation", async () => {
+    useHome()
+    const state = initEvosearch({ task: TASK, k: 2 })
+    const { author } = makeFakeAuthor()
+    const { runner, evals } = makeAttemptRunner((_iter, name) =>
+      name.startsWith("A") ? { pass: true } : { pass: false, stage: "s", reason: "r" },
+    )
+
+    const final = await runEvosearch({
+      stateDir: state.dir,
+      threshold: 0.8,
+      maxIterations: 1,
+      trials: 1,
+      author,
+      spawnRunner: runner,
+    })
+
+    assert.strictEqual(final.stopReason, "solved")
+    assert.deepStrictEqual(
+      evals.map((e) => `${e.name}#${e.attempt}`),
+      ["A#1", "B#1"],
+    )
+    const a = final.candidates.find((c) => c.name === "A")!
+    assert.strictEqual(a.trials, 1)
+    assert.strictEqual(a.passRate, 1)
   })
 })
 
